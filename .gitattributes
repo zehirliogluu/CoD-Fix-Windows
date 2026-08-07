@@ -1,0 +1,10 @@
+# CoD-Fix.cmd MUSS CRLF behalten - cmd.exe kann Dateien mit LF-Zeilenenden
+# nicht zuverlaessig ausfuehren. Ohne diese Regel wandelt Git die Datei auf
+# Linux/macOS-Systemen um und sie startet auf Windows nicht mehr.
+*.cmd   text eol=crlf
+*.bat   text eol=crlf
+*.ps1   text eol=crlf
+
+# Markdown und Lizenz normal behandeln
+*.md    text
+LICENSE text

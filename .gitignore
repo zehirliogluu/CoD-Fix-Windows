@@ -1,0 +1,14 @@
+# Vom Werkzeug erzeugte Backups und Protokolle
+CoD-Fix-Backups/
+*.log
+
+# Temporaere Dateien
+# (Das Werkzeug entpackt sich zur Laufzeit nach %TEMP%\CoD-Fix-<zufall>\,
+#  nicht in den Projektordner - diese Regeln sind reine Vorsorge.)
+CoD-Fix-run.ps1
+CoD-Fix-*/
+*.tmp
+
+# Windows
+Thumbs.db
+desktop.ini
