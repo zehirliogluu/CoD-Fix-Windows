@@ -4,6 +4,20 @@ Alle nennenswerten Änderungen an CoD-Fix. Neueste Fassung zuerst.
 
 ---
 
+## v3.3
+
+### Behobene Fehler
+
+- **Rückgängig war im Menü unsichtbar.** Die Fixes sagen am Ende „Menü 4, dann 1b" — im Untermenü stand `1b` aber nirgends, nur ein grauer Hinweis in der Fußzeile. Wer ihn übersah, hielt den Punkt für nicht vorhanden und drückte `1`, also die Reparatur noch einmal. Jetzt steht unter jedem Punkt eine eigene Zeile `1b  RUECKGAENGIG - zurueck auf den Stand vom …`, sobald es dafür ein Backup gibt. Leere Backup-Ordner (Fix abgebrochen) zählen nicht.
+- **Von Hand gesetzter DNS ließ sich nicht zurückstellen, wenn er per PowerShell eingetragen war.** Windows füllt den Registry-Wert dann mit NUL-Zeichen auf, und die letzte Adresse wurde mitsamt diesen Zeichen gelesen — ungültig. Das Zurückstellen setzte erst auf „automatisch" und scheiterte dann am Wiedereintragen. Jetzt werden NUL-Zeichen als Trenner behandelt, auch in Sicherungen, die v3.2 bereits geschrieben hat.
+- Der Hinweis beim Abschalten des letzten Tonausgangs nennt jetzt den echten Weg („Menü 2, dann 4b").
+
+### Geändert
+
+- `1 b` (mit Leerzeichen) wird genauso verstanden wie `1b`.
+
+---
+
 ## v3.2
 
 ### Behobene Fehler
