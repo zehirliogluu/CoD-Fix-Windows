@@ -1974,7 +1974,7 @@ function Action-13 {
         # Nicht ein zweites Mal umstellen: die zweite Sicherung wuerde den
         # Cloudflare-Stand festhalten - und das Original waere verloren.
         Ok 'DNS steht bereits auf Cloudflare (1.1.1.1).'
-        Info 'Zurueck zum vorherigen Stand mit 13b.'
+        Info 'Zurueck zum vorherigen Stand: Menue 4, dann 1b.'
     } elseif ((-not $e.DnsLebt) -and ($jetzt.V4.Count -gt 0)) {
         # Von Hand eingetragener DNS, der nicht antwortet - typischer Rest
         # eines VPNs, das beim Trennen nicht aufgeraeumt hat.
@@ -1997,7 +1997,7 @@ function Action-13 {
             Warn 'Achtung: damit umgehst du deinen DNS-Filter an diesem PC.'
             Info 'Als Test ist das ideal - laeuft es danach, liegt es am Filter.'
         }
-        Info 'Rueckgaengig jederzeit mit 13b - exakt auf den jetzigen Stand.'
+        Info 'Rueckgaengig jederzeit: Menue 4, dann 1b - exakt auf den jetzigen Stand.'
         if (Frage-JaNein "     DNS auf Cloudflare umstellen? (j/n)") {
             $bk = New-BackupSet -Name '13_Download'
             $null = Set-DnsZiel -Adapter $ad -Ziel 'Cloudflare' -Datei (Join-Path $bk 'dns.txt')

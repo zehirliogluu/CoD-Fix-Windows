@@ -247,7 +247,7 @@ Beendet vorher Spiel **und** Launcher, damit nichts zurückgeschrieben wird.
 | DNS | von Hand gesetzt, antwortet nicht | Bietet an, ihn auf „automatisch" zurückzusetzen — oft Rest eines getrennten VPNs |
 | alles unauffällig | — | Bietet Cloudflare (1.1.1.1) als DNS an — der häufigste Fix für HILLCAT |
 
-Beim Umstellen merkt sich das Werkzeug, ob dein DNS vorher **von Hand eingetragen** war oder **automatisch** vom Router kam, und stellt mit `13b` exakt diesen Zustand wieder her. Löst nach der Umstellung nichts mehr auf, wird **sofort automatisch zurückgestellt**.
+Beim Umstellen merkt sich das Werkzeug, ob dein DNS vorher **von Hand eingetragen** war oder **automatisch** vom Router kam, und stellt mit **4 → 1b** exakt diesen Zustand wieder her. Löst nach der Umstellung nichts mehr auf, wird **sofort automatisch zurückgestellt**.
 
 Vor jeder Firewall-Änderung wird die **komplette Regelsammlung** gesichert — damit lässt sich das Entfernen einer Blockade später wirklich zurücknehmen.
 
