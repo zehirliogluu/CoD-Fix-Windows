@@ -1,6 +1,6 @@
 <#
 ================================================================================
-  CALL OF DUTY - FIX-WERKZEUG  v3.1
+  CALL OF DUTY - FIX-WERKZEUG  v3.2
   Behebt die haeufigsten PC-Probleme: haengender Login, Schwarzbild,
   Tonprobleme, Dev-/DirectX-Fehler, Verbindungsabbrueche.
 
@@ -29,7 +29,7 @@
 #>
 
 $ErrorActionPreference = 'Continue'
-$Script:Version = '3.1'
+$Script:Version = '3.2'
 
 # ============================== GRUNDLAGEN ====================================
 
@@ -161,7 +161,10 @@ $Script:Ziele = @(
        Tipp='Eine Sperre zeigt sich oft als stumm haengender Login.' },
     @{ Nr='12'; Was='Activision - Serverstatus'
        Datei='https://support.activision.com/onlineservices'; Arg=@(); Hand='support.activision.com/onlineservices'
-       Tipp='Liegt es an den Servern, hilft am eigenen PC gar nichts.' }
+       Tipp='Liegt es an den Servern, hilft am eigenen PC gar nichts.' },
+    @{ Nr='13'; Was='Steam - Spieldateien pruefen (Call of Duty)'
+       Datei='steam://validate/1938090'; Arg=@(); Hand='Steam -> Rechtsklick aufs Spiel -> Eigenschaften -> Installierte Dateien'
+       Tipp='Laedt kaputte oder fehlende Dateien nach. Dauert je nach Platte 5 bis 20 Minuten.' }
 )
 
 function Oeffne-Ziel {
@@ -560,19 +563,27 @@ function Stop-GameAndLaunchers {
     param([switch]$LaunchersToo)
     Say "      Beende Call of Duty..." 'Gray'
     $codPaths = Get-CodInstallPaths
+    # Gefunden wird in erster Linie ueber den PFAD: alles, was aus einem
+    # CoD-Spielordner laeuft (cod.exe, bootstrapper.exe, CODBrokerService ...).
+    #
+    # Die Namensliste ist nur die Rueckfallebene fuer ein Spiel in einem
+    # Ordner, den Get-CodInstallPaths nicht kennt - und sie ist bewusst
+    # VERANKERT (^...$). Der fruehere Filter '^cod' traf auch "Code", also
+    # Visual Studio Code, und hat es bei jeder Reparatur beendet, samt
+    # ungespeicherter Arbeit. "bootstrapper" fehlt absichtlich: so heissen
+    # viele fremde Installer; der von CoD liegt im Spielordner.
+    $namen = '^(cod|cod\d+-cod|codCrashHandler|CODBrokerService|BlackOps\w*|ModernWarfare\w*)$'
     $procs = Get-Process -ErrorAction SilentlyContinue | Where-Object {
         $pp = $null; try { $pp = $_.Path } catch {}
         if ($pp) {
             foreach ($c in $codPaths) {
                 # StartsWith statt -like: Klammern im Pfad ("Program Files (x86)")
-                # sind fuer -like Platzhalter und wuerden den Vergleich verfaelschen.
-                if ($pp.StartsWith($c, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+                # sind fuer -like Platzhalter. Der abschliessende \ verhindert,
+                # dass "...\Call of Duty" auch "...\Call of DutyXYZ" trifft.
+                if ($pp.StartsWith($c.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { return $true }
             }
         }
-        # -match statt -cmatch: der Battle.net-Prozess heisst "Bootstrapper"
-        # mit grossem B und wurde bei Gross-/Kleinschreibung schlicht uebersehen.
-        # Ausgerechnet er schreibt den Anmelde-Cache zurueck, den Aktion 1 loescht.
-        return ($_.ProcessName -match '^(cod|bootstrapper|blackops|modernwarfare|warzone)')
+        return ($_.ProcessName -match $namen)
     }
     if ($procs) {
         foreach ($p in $procs) {
@@ -587,7 +598,14 @@ function Stop-GameAndLaunchers {
         Say "      Beende Launcher (Steam / Battle.net)..." 'Gray'
         $lp = @()
         foreach ($n in @('steam','steamwebhelper','steamservice','Battle.net','Agent','BlizzardBrowser','Blizzard Error Handler')) {
-            $lp += Get-Process -Name $n -ErrorAction SilentlyContinue
+            foreach ($p in (Get-Process -Name $n -ErrorAction SilentlyContinue)) {
+                # "Agent" ist ein Allerweltsname - nur den von Battle.net nehmen.
+                if ($n -eq 'Agent') {
+                    $pp = $null; try { $pp = $p.Path } catch {}
+                    if ("$pp" -notmatch 'Battle\.net|Blizzard') { continue }
+                }
+                $lp += $p
+            }
         }
         # Namen vorher merken - nach dem Beenden lassen sie sich nicht mehr
         # zuverlaessig vom Prozessobjekt lesen.
@@ -1614,6 +1632,367 @@ function Action-6b {
     Warn 'Falls das Internet danach klemmt: PC neu starten.'
 }
 
+# ================== 13  DOWNLOAD FEHLGESCHLAGEN (HILLCAT) =====================
+#
+# HILLCAT heisst: das Spiel konnte seine EIGENEN Daten nicht von Activision
+# laden. Das ist nicht Steams Download - CoD holt nach dem Start eigene Pakete
+# nach, und genau dabei steht "Pruefung auf Update". Deshalb hilft eine
+# Neuinstallation fast nie. Es liegt am Weg zu den Servern:
+#
+#   - ein VPN leitet den gesamten Download ueber einen fremden Server
+#   - ein DNS-Filter (AdGuard, Pi-hole, NextDNS) sperrt eine Adresse,
+#     auf die das Spiel wartet
+#   - eine Zeile in der hosts-Datei leitet eine Spieladresse ins Leere
+#   - der DNS des Anbieters schickt zu einem Verteilknoten, der klemmt
+#
+# Die Aktion prueft das der Reihe nach und aendert nur, was sie selbst
+# exakt zuruecknehmen kann.
+
+# Adressen, die das Spiel beim Start und beim Nachladen braucht. Alle sind
+# gegen oeffentliche DNS-Server geprueft - sie existieren wirklich. Liefert
+# der eigene DNS dafuer "gibt es nicht", ist das eine Sperre.
+$Script:SpielAdressen = @(
+    'activision.com','s.activision.com','profile.callofduty.com','www.callofduty.com',
+    'cdn.callofduty.com','telescope.callofduty.com','my.callofduty.com','demonware.net',
+    'level3.blizzard.com','eu.patch.battle.net','cdn.blz-contentstack.com','blzddist1-a.akamaihd.net'
+)
+# Werbeadressen als Probe: ein DNS-Filter antwortet darauf mit 0.0.0.0 oder
+# "gibt es nicht", ein gewoehnlicher DNS mit einer echten Adresse.
+$Script:FilterProbe = @('doubleclick.net','googleadservices.com')
+$Script:VpnMuster   = 'WireGuard|Wintun|TAP-Windows|OpenVPN|VPN|Tailscale|ZeroTier|NordLynx|AnyConnect|Fortinet|PANGP|Pulse Secure|Proton|Mullvad|Surfshark|CyberGhost|ExpressVPN'
+$Script:Cloudflare4 = @('1.1.1.1','1.0.0.1')
+$Script:Cloudflare6 = @('2606:4700:4700::1111','2606:4700:4700::1001')
+
+# Fragt eine Adresse ab und ordnet die Antwort ein:
+#   eine IP     aufgeloest
+#   'gesperrt'  0.0.0.0 oder 127.x - so antworten DNS-Filter und hosts-Sperren
+#   'fehlt'     "gibt es nicht" (NXDOMAIN)
+#   'fehler'    keine Antwort, abgelehnt, Zeitueberschreitung
+# Ohne -Server wird der DNS gefragt, den Windows gerade benutzt - also genau
+# der, den auch das Spiel bekommt.
+function Resolve-Probe {
+    param([string]$Name, [string]$Server = '')
+    try {
+        $p = @{ Name = $Name; Type = 'A'; DnsOnly = $true; QuickTimeout = $true; ErrorAction = 'Stop' }
+        if ($Server) { $p.Server = $Server }
+        $r = Resolve-DnsName @p | Where-Object { $_.IPAddress } | Select-Object -First 1
+        if (-not $r) { return 'fehler' }
+        if (($r.IPAddress -eq '0.0.0.0') -or ($r.IPAddress -match '^127\.')) { return 'gesperrt' }
+        return $r.IPAddress
+    } catch {
+        if ($_.Exception.Message -match 'nicht vorhanden|does not exist|NXDOMAIN|9003') { return 'fehlt' }
+        return 'fehler'
+    }
+}
+
+# Ein unabhaengiger Vergleichsserver: erst Cloudflare, dann Google - manche
+# Netze sperren einen der beiden.
+function Get-KontrollDns {
+    foreach ($s in '1.1.1.1','8.8.8.8') {
+        if ((Resolve-Probe -Name 'www.microsoft.com' -Server $s) -match '^\d') { return $s }
+    }
+    return ''
+}
+
+# Ein VPN, das den ganzen Verkehr umleitet, erkennt man an seinen Routen:
+# WireGuard und OpenVPN legen 0.0.0.0/1 und 128.0.0.0/1 an und verdraengen so
+# die normale Standardroute, ohne sie zu loeschen. Ein VPN, das nur einzelne
+# Netze umleitet, betrifft das Spiel nicht und wird uebergangen.
+function Get-VpnAdapter {
+    $treffer = @()
+    $routen = @(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                Where-Object { $_.DestinationPrefix -in '0.0.0.0/0','0.0.0.0/1','128.0.0.0/1' })
+    foreach ($r in $routen) {
+        $nic = Get-NetAdapter -InterfaceIndex $r.InterfaceIndex -IncludeHidden -ErrorAction SilentlyContinue
+        if ((-not $nic) -or ($nic.Status -ne 'Up')) { continue }
+        if ("$($nic.Name) $($nic.InterfaceDescription)" -match $Script:VpnMuster) { $treffer += $nic.Name }
+    }
+    return @($treffer | Select-Object -Unique)
+}
+
+# Prueft alle Wege und liefert nur einen Befund - aendert selbst nichts.
+# Wird von Aktion 13 und von der Diagnose benutzt.
+function Test-SpielVerbindung {
+    param([switch]$CacheLeeren)
+    # Nur in Aktion 13: sonst antwortet womoeglich der Zwischenspeicher mit
+    # einer alten Adresse. Die Diagnose laesst ihn in Ruhe - sie aendert nichts.
+    if ($CacheLeeren) { Clear-DnsClientCache -ErrorAction SilentlyContinue }
+
+    $kontrolle = Get-KontrollDns
+    $dnsLebt   = ((Resolve-Probe -Name 'www.microsoft.com') -match '^\d')
+
+    $filter = $false
+    if ($dnsLebt) {
+        foreach ($h in $Script:FilterProbe) {
+            if ((Resolve-Probe -Name $h) -notmatch '^\d') { $filter = $true }
+        }
+    }
+
+    $gesperrt = @()
+    if ($dnsLebt) {
+        foreach ($h in $Script:SpielAdressen) {
+            $a = Resolve-Probe -Name $h
+            if ($a -match '^\d') { continue }
+            # Nur als gesperrt werten, wenn ein unabhaengiger Server die Adresse
+            # kennt - sonst koennte sie schlicht nicht mehr existieren.
+            if ($a -eq 'gesperrt') { $gesperrt += $h }
+            elseif ($kontrolle -and ((Resolve-Probe -Name $h -Server $kontrolle) -match '^\d')) { $gesperrt += $h }
+        }
+    }
+
+    $hostsPfad = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
+    $hosts = @(Get-Content $hostsPfad -ErrorAction SilentlyContinue | Where-Object {
+        ($_ -notmatch '^\s*#') -and ($_ -match 'activision|callofduty|demonware|blizzard|battle\.net|blz')
+    })
+
+    return [pscustomobject]@{
+        Vpn       = @(Get-VpnAdapter)
+        DnsLebt   = $dnsLebt
+        Filter    = $filter
+        Gesperrt  = $gesperrt
+        Hosts     = $hosts
+        HostsPfad = $hostsPfad
+        Kontrolle = $kontrolle
+    }
+}
+
+# --- DNS eines Adapters sichern, umstellen und exakt zurueckstellen ----------
+# Ob der DNS von Hand gesetzt oder automatisch vom Router kommt, steht in der
+# Registry unter "NameServer": leer = automatisch. Genau diesen Unterschied
+# braucht das Zurueckstellen - wer seinen DNS von Hand eingetragen hat (oder
+# ein VPN, das ihn gesetzt hat), darf ihn danach nicht als "automatisch"
+# wiederbekommen.
+function Get-DnsEinstellung {
+    param([string]$Adapter)
+    $nic = Get-NetAdapter -Name $Adapter -ErrorAction SilentlyContinue
+    if (-not $nic) { return $null }
+    $g  = $nic.InterfaceGuid
+    $v4 = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$g"  -Name NameServer -ErrorAction SilentlyContinue).NameServer
+    $v6 = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces\$g" -Name NameServer -ErrorAction SilentlyContinue).NameServer
+    return [pscustomobject]@{
+        Adapter = $Adapter
+        V4      = @("$v4" -split '[,\s]+' | Where-Object { $_ })
+        V6      = @("$v6" -split '[,\s]+' | Where-Object { $_ })
+    }
+}
+
+function Save-DnsEinstellung {
+    param($Einstellung, [string]$Datei)
+    @("Adapter`t$($Einstellung.Adapter)",
+      "IPv4`t$($Einstellung.V4 -join ',')",
+      "IPv6`t$($Einstellung.V6 -join ',')") | Out-File -FilePath $Datei -Encoding utf8
+}
+
+function Restore-DnsEinstellung {
+    param([string]$Datei)
+    $w = @{}
+    foreach ($z in (Get-Content $Datei -ErrorAction SilentlyContinue)) {
+        $t = $z -split "`t", 2
+        if ($t.Count -eq 2) { $w[$t[0]] = $t[1] }
+    }
+    if (-not $w['Adapter']) { Fail 'Sicherung unvollstaendig - der Adapter fehlt.'; return $false }
+    $statisch = @("$($w['IPv4']),$($w['IPv6'])" -split '[,\s]+' | Where-Object { $_ })
+    try {
+        # Erst alles auf "automatisch", dann die frueher von Hand gesetzten
+        # Server wieder eintragen. So stimmt der Zustand auch dann exakt, wenn
+        # vorher nur IPv4 von Hand gesetzt war.
+        Set-DnsClientServerAddress -InterfaceAlias $w['Adapter'] -ResetServerAddresses -ErrorAction Stop
+        if ($statisch) { Set-DnsClientServerAddress -InterfaceAlias $w['Adapter'] -ServerAddresses $statisch -ErrorAction Stop }
+        Clear-DnsClientCache -ErrorAction SilentlyContinue
+        if ($statisch) { Ok "DNS zurueckgestellt auf: $($statisch -join ', ')" }
+        else           { Ok 'DNS zurueckgestellt auf: automatisch (vom Router)' }
+        return $true
+    } catch {
+        Fail "DNS liess sich nicht zurueckstellen - $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Set-DnsZiel {
+    param([string]$Adapter, [ValidateSet('Cloudflare','Automatisch')][string]$Ziel, [string]$Datei)
+    $vorher = Get-DnsEinstellung -Adapter $Adapter
+    if (-not $vorher) { Fail "Adapter '$Adapter' nicht gefunden."; return $false }
+    Save-DnsEinstellung -Einstellung $vorher -Datei $Datei
+    try {
+        if ($Ziel -eq 'Automatisch') {
+            Set-DnsClientServerAddress -InterfaceAlias $Adapter -ResetServerAddresses -ErrorAction Stop
+        } else {
+            $neu = @($Script:Cloudflare4)
+            $v6  = Get-NetAdapterBinding -Name $Adapter -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue
+            if ($v6 -and $v6.Enabled) { $neu += $Script:Cloudflare6 }
+            Set-DnsClientServerAddress -InterfaceAlias $Adapter -ServerAddresses $neu -ErrorAction Stop
+        }
+        Clear-DnsClientCache -ErrorAction SilentlyContinue
+    } catch {
+        Fail "DNS liess sich nicht umstellen - $($_.Exception.Message)"
+        $null = Restore-DnsEinstellung -Datei $Datei
+        return $false
+    }
+    # Gegenprobe. Loest danach nichts mehr auf, wird SOFORT zurueckgestellt:
+    # ein PC ohne funktionierenden DNS hat praktisch kein Internet mehr.
+    Start-Sleep -Seconds 2
+    if ((Resolve-Probe -Name 'www.callofduty.com') -match '^\d') {
+        Ok "DNS umgestellt ($Ziel) - Spieladressen loesen auf"
+        return $true
+    }
+    Fail 'Nach der Umstellung loest nichts mehr auf - ich stelle sofort zurueck.'
+    $null = Restore-DnsEinstellung -Datei $Datei
+    return $false
+}
+
+function Action-13 {
+    Titel '13' 'DOWNLOAD FEHLGESCHLAGEN (HILLCAT)'
+    Info 'HILLCAT heisst: das Spiel konnte seine EIGENEN Daten nicht laden.'
+    Info 'Das ist nicht der Steam-Download - deshalb hilft neu installieren'
+    Info 'fast nie. Es liegt am Weg zu den Activision-Servern.'
+    Write-Host ""
+
+    Stop-GameAndLaunchers
+
+    Say "      Verbindungsweg pruefen..." 'Gray'
+    $e = Test-SpielVerbindung -CacheLeeren
+
+    # --- Befund ---
+    if ($e.Vpn.Count -gt 0) { Warn "VPN an: $($e.Vpn -join ', ')" } else { Ok 'kein VPN aktiv' }
+    if (-not $e.DnsLebt)    { Fail 'DNS antwortet nicht - es wird gar nichts aufgeloest!' }
+    elseif ($e.Filter)      { Info 'DNS-Filter aktiv (AdGuard, Pi-hole, NextDNS o.ae.)' }
+    else                    { Ok 'DNS antwortet normal, kein Filter' }
+    if ($e.Gesperrt.Count -gt 0) { Fail ("gesperrt: " + ($e.Gesperrt -join ', ')) }
+    elseif ($e.DnsLebt)          { Ok "alle $($Script:SpielAdressen.Count) Spieladressen erreichbar" }
+    if ($e.Hosts.Count -gt 0) { Fail "hosts-Datei leitet $($e.Hosts.Count) Spieladresse(n) um" }
+    else                      { Ok 'hosts-Datei sauber' }
+
+    # --- 1. hosts-Datei: eine eindeutige Ursache, aber eine bewusste Aenderung ---
+    if ($e.Hosts.Count -gt 0) {
+        Write-Host ""
+        Warn 'In der hosts-Datei stehen Eintraege fuer Spieladressen:'
+        foreach ($z in $e.Hosts) { Info "  $($z.Trim())" }
+        Info 'Die hat jemand von Hand eingetragen - oft, um Telemetrie zu'
+        Info 'sperren. Ich loesche sie nicht selbst, ich zeige dir, wo.'
+        Zeige-Schritte -Ueberschrift 'HOSTS-DATEI BEREINIGEN' -Schritte @(
+            'Warte, bis der Editor mit der hosts-Datei aufgeht',
+            'Setze vor jede der oben genannten Zeilen ein # (Raute)',
+            'Speichern mit Strg+S, Editor schliessen',
+            'Das Spiel neu starten'
+        )
+        if (Frage-JaNein "     hosts-Datei jetzt im Editor oeffnen? (j/n)") {
+            $null = Oeffne-Windows -Was 'hosts-Datei' -Datei 'notepad.exe' -Argumente @("`"$($e.HostsPfad)`"") -VonHand "Editor als Administrator -> $($e.HostsPfad)"
+        }
+    }
+
+    # --- 2. VPN: den DNS dann bewusst NICHT anfassen ---
+    if ($e.Vpn.Count -gt 0) {
+        Write-Host ""
+        Info 'Mit VPN laeuft der GANZE Download ueber den VPN-Server - eine'
+        Info 'haeufige Ursache fuer HILLCAT. Manchmal hilft ein VPN auch, wenn'
+        Info 'der eigene Anbieter klemmt. Klarheit bringt nur der Vergleich.'
+        Zeige-Schritte -Ueberschrift 'SO FINDEST DU ES HERAUS' -Schritte @(
+            'Oeffne dein VPN-Programm und TRENNE die Verbindung',
+            'Starte das Spiel',
+            'Laeuft es? Dann war es das VPN - zum Spielen einfach aus lassen',
+            'Laeuft es nicht? Starte diese Aktion ohne VPN noch einmal'
+        )
+        Info 'Den DNS stelle ich bei aktivem VPN bewusst NICHT um: das VPN hat'
+        Info 'ihn selbst gesetzt, eine Aenderung wuerde mit ihm kollidieren.'
+        return
+    }
+
+    # --- 3. Gesperrte Spieladressen in einem DNS-Filter ---
+    if ($e.Gesperrt.Count -gt 0) {
+        Write-Host ""
+        Warn 'Dein DNS sperrt Adressen, die das Spiel braucht.'
+        Zeige-Schritte -Ueberschrift 'IN DEINEM DNS-FILTER FREIGEBEN' -Schritte @(
+            'Oeffne die Oberflaeche deines Filters (AdGuard Home, Pi-hole ...)',
+            'Gehe zu den eigenen Filterregeln oder zur Freigabeliste (Allowlist)',
+            ('Gib diese Adressen frei: ' + ($e.Gesperrt -join ', ')),
+            'Speichern und das Spiel neu starten'
+        )
+        Info 'Schreibweise fuer AdGuard Home, je Adresse eine Zeile:'
+        foreach ($h in $e.Gesperrt) { Info "  @@||$h^`$important" }
+    } elseif ($e.Filter) {
+        Write-Host ""
+        Info 'Dein DNS-Filter sperrt keine der bekannten Spieladressen. Er kann'
+        Info 'aber eine sperren, die hier nicht geprueft wird - etwa eine fuer'
+        Info 'Telemetrie, auf die das Spiel beim Start wartet. Das sieht man nur'
+        Info 'im Abfrageprotokoll des Filters:'
+        Zeige-Schritte -Ueberschrift 'IM FILTER-PROTOKOLL NACHSEHEN' -Schritte @(
+            'Oeffne das Abfrageprotokoll deines Filters (AdGuard: "Abfrageprotokoll")',
+            'Starte das Spiel und warte auf den Fehler',
+            'Filtere im Protokoll nach "Blockiert"',
+            'Suche nach activision, callofduty, demonware oder blizzard',
+            'Genau diese Adressen in der Freigabeliste eintragen'
+        )
+    }
+
+    # --- 4. DNS umstellen - zum Testen oder als eigentliche Loesung ---
+    $ad = Get-ActiveAdapter
+    if (-not $ad) { Fail 'Kein aktiver Netzwerkadapter gefunden.'; return }
+    $jetzt = Get-DnsEinstellung -Adapter $ad
+    $istCloudflare = ($jetzt -and ($jetzt.V4 -contains '1.1.1.1'))
+
+    Write-Host ""
+    if ($istCloudflare) {
+        # Nicht ein zweites Mal umstellen: die zweite Sicherung wuerde den
+        # Cloudflare-Stand festhalten - und das Original waere verloren.
+        Ok 'DNS steht bereits auf Cloudflare (1.1.1.1).'
+        Info 'Zurueck zum vorherigen Stand mit 13b.'
+    } elseif ((-not $e.DnsLebt) -and ($jetzt.V4.Count -gt 0)) {
+        # Von Hand eingetragener DNS, der nicht antwortet - typischer Rest
+        # eines VPNs, das beim Trennen nicht aufgeraeumt hat.
+        Warn "Von Hand eingetragen ist $($jetzt.V4 -join ', ') - und der antwortet nicht."
+        Info 'Das ist oft ein Rest eines VPNs, das beim Trennen nicht'
+        Info 'aufgeraeumt hat. Richtig ist dann: DNS wieder automatisch'
+        Info 'vom Router beziehen.'
+        if (Frage-JaNein "     DNS auf automatisch zuruecksetzen? (j/n)") {
+            $bk = New-BackupSet -Name '13_Download'
+            $null = Set-DnsZiel -Adapter $ad -Ziel 'Automatisch' -Datei (Join-Path $bk 'dns.txt')
+        }
+    } else {
+        $aktuell = 'automatisch (vom Router)'
+        if ($jetzt.V4.Count -gt 0) { $aktuell = ($jetzt.V4 -join ', ') + ' (von Hand eingetragen)' }
+        Info "Dein DNS jetzt: $aktuell"
+        Info 'Der haeufigste Fix fuer HILLCAT ist ein anderer DNS-Server. Dein'
+        Info 'Anbieter schickt dich sonst zu einem Verteilknoten, der klemmen'
+        Info 'kann. Cloudflare (1.1.1.1) ist schnell und protokolliert nichts.'
+        if ($e.Filter) {
+            Warn 'Achtung: damit umgehst du deinen DNS-Filter an diesem PC.'
+            Info 'Als Test ist das ideal - laeuft es danach, liegt es am Filter.'
+        }
+        Info 'Rueckgaengig jederzeit mit 13b - exakt auf den jetzigen Stand.'
+        if (Frage-JaNein "     DNS auf Cloudflare umstellen? (j/n)") {
+            $bk = New-BackupSet -Name '13_Download'
+            $null = Set-DnsZiel -Adapter $ad -Ziel 'Cloudflare' -Datei (Join-Path $bk 'dns.txt')
+        }
+    }
+
+    # --- 5. Spieldateien von Steam pruefen lassen ---
+    $steamCod = $false
+    foreach ($lib in Get-SteamLibraries) {
+        if (Test-Path (Join-Path $lib 'steamapps\appmanifest_1938090.acf')) { $steamCod = $true }
+    }
+    if ($steamCod) {
+        Write-Host ""
+        Info 'Zusaetzlich hilft oft, die Spieldateien pruefen zu lassen. Steam'
+        Info 'laedt dabei kaputte oder fehlende Dateien nach (5-20 Minuten).'
+        Frage-Oeffnen -Nr '13' -Frage 'Spieldateien jetzt von Steam pruefen lassen?'
+    }
+
+    Write-Host ""
+    Ok "FERTIG"
+    Info 'Jetzt das Spiel starten. "Pruefung auf Update" kann beim ersten'
+    Info 'Mal mehrere Minuten stehen bleiben - das ist normal, nicht abbrechen.'
+}
+
+function Action-13b {
+    Titel '13b' 'DNS WIEDER ZURUECKSTELLEN'
+    $bk = Get-LatestBackup -Name '13_Download'
+    if (-not $bk) { Info 'Der DNS wurde von diesem Werkzeug nie umgestellt.'; return }
+    $f = Join-Path $bk.FullName 'dns.txt'
+    if (-not (Test-Path $f)) { Info 'In der letzten Sicherung wurde der DNS nicht veraendert.'; return }
+    $null = Restore-DnsEinstellung -Datei $f
+    Info 'Eine hosts-Datei und ein VPN hat diese Aktion nie angefasst.'
+}
+
 # ============================== 7  OVERLAYS ===================================
 
 function Action-7 {
@@ -1667,8 +2046,10 @@ function Action-8 {
     # Blockade-Regel abgefragt - auf einem normalen Windows dauert das lange.
     #
     # Das Muster ist bewusst eng gefasst: ein blosses "cod" wuerde auch
-    # Codec- oder Encoder-Pfade treffen und fremde Regeln loeschen.
-    $muster = '\\cod[^\\]*\.exe$|\\Call of Duty\b|\\steam(webhelper)?\.exe$|\\Battle\.net\.exe$|\\bootstrapper[^\\]*\.exe$'
+    # Codec- oder Encoder-Pfade treffen und fremde Regeln loeschen. Nach
+    # "cod" muss deshalb direkt ".exe", eine Ziffer oder ein Bindestrich
+    # folgen - sonst traefe es auch Code.exe (Visual Studio Code).
+    $muster = '\\cod(?:\.exe|[0-9-][^\\]*\.exe)$|\\Call of Duty\b|\\steam(webhelper)?\.exe$|\\Battle\.net\.exe$|\\bootstrapper[^\\]*\.exe$'
     $blocker = @()
     foreach ($af in (Get-NetFirewallApplicationFilter -All -ErrorAction SilentlyContinue)) {
         if (-not $af.Program) { continue }
@@ -2057,6 +2438,19 @@ function Action-D {
         # und laesst die Diagnose bei einem toten Host sehr lange stehen.
         if (Test-Port -Ziel $h -Port 443) { Ok "$h erreichbar" } else { Fail "$h NICHT erreichbar" }
     }
+    # Die Wege, an denen HILLCAT und "Pruefung auf Update" meist haengen.
+    # Ohne -CacheLeeren: die Diagnose aendert nichts, auch nicht den Cache.
+    $sv = Test-SpielVerbindung
+    if ($sv.Vpn.Count -gt 0) { Warn "VPN an: $($sv.Vpn -join ', ') - leitet auch den Spiel-Download um" }
+    else                     { Ok 'kein VPN aktiv' }
+    if (-not $sv.DnsLebt)    { Fail 'DNS antwortet nicht!' }
+    elseif ($sv.Filter)      { Info 'DNS-Filter aktiv (AdGuard, Pi-hole o.ae.)' }
+    if ($sv.Gesperrt.Count -gt 0) { Fail ('gesperrte Spieladressen: ' + ($sv.Gesperrt -join ', ')) }
+    elseif ($sv.DnsLebt)          { Ok "alle $($Script:SpielAdressen.Count) Spieladressen loesen auf" }
+    if ($sv.Hosts.Count -gt 0)    { Warn "hosts-Datei leitet $($sv.Hosts.Count) Spieladresse(n) um" }
+    if (($sv.Vpn.Count -gt 0) -or ($sv.Gesperrt.Count -gt 0) -or ($sv.Hosts.Count -gt 0) -or (-not $sv.DnsLebt)) {
+        Info '  -> Hilfe dazu: Menue 4, Punkt 1 (Download fehlgeschlagen)'
+    }
     Write-Host ""
 
     Write-Host "   UHRZEIT" -ForegroundColor White
@@ -2125,6 +2519,7 @@ function Action-A {
     Action-5b
     Action-11b
     Action-12b
+    Action-13b
     Action-8b
     Action-9b
     Action-10b
@@ -2296,8 +2691,11 @@ $Script:Kategorien = @(
     @{
         Key    = '4'
         Name   = 'VERBINDUNG / INTERNET'
-        Kurz   = 'Disconnects, Verbindungsfehler'
+        Kurz   = 'haengt beim Update, Download-Fehler, Disconnects'
         Punkte = @(
+            @{ Text = 'Download fehlgeschlagen (HILLCAT)'
+               Wann = 'haengt bei "Pruefung auf Update", Fehlercode HILLCAT'
+               Fix  = 'Action-13'; Undo = 'Action-13b' },
             @{ Text = 'Verbindungsfehler, Disconnects'
                Wann = 'Verbindung zum Host verloren, Warteschleife'
                Fix  = 'Action-6';  Undo = 'Action-6b' },
