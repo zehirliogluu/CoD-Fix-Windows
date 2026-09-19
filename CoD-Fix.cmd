@@ -39,7 +39,7 @@ exit /b
 :::PSCODE:::
 <#
 ================================================================================
-  CALL OF DUTY - FIX-WERKZEUG  v3.2
+  CALL OF DUTY - FIX-WERKZEUG  v3.3
   Behebt die haeufigsten PC-Probleme: haengender Login, Schwarzbild,
   Tonprobleme, Dev-/DirectX-Fehler, Verbindungsabbrueche.
 
@@ -68,7 +68,7 @@ exit /b
 #>
 
 $ErrorActionPreference = 'Continue'
-$Script:Version = '3.2'
+$Script:Version = '3.3'
 
 # ============================== GRUNDLAGEN ====================================
 
@@ -1531,7 +1531,7 @@ function Action-12 {
                     Warn 'ACHTUNG: Das ist dein LETZTER eingeschalteter Tonausgang.'
                     Warn 'Wenn du ihn abschaltest, hat der PC gar keinen Ton mehr -'
                     Warn 'auch nicht ausserhalb des Spiels.'
-                    Info 'Rueckgaengig geht das jederzeit ueber Punkt 4b im Menue TON.'
+                    Info 'Rueckgaengig jederzeit: Menue 2, dann 4b.'
                     Write-Host ""
                     if (-not (Frage-JaNein "     Wirklich abschalten? (j/n)")) {
                         Info 'Abgebrochen - nichts geaendert.'
@@ -1808,10 +1808,14 @@ function Get-DnsEinstellung {
     $g  = $nic.InterfaceGuid
     $v4 = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$g"  -Name NameServer -ErrorAction SilentlyContinue).NameServer
     $v6 = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces\$g" -Name NameServer -ErrorAction SilentlyContinue).NameServer
+    # \x00 muss mit in die Trennzeichen: Set-DnsClientServerAddress fuellt den
+    # Wert mit NUL-Zeichen auf ("1.0.0.1" + 42x NUL). \s erkennt die nicht -
+    # die letzte Adresse waere sonst ungueltig, und das Zurueckstellen darauf
+    # schlaegt fehl.
     return [pscustomobject]@{
         Adapter = $Adapter
-        V4      = @("$v4" -split '[,\s]+' | Where-Object { $_ })
-        V6      = @("$v6" -split '[,\s]+' | Where-Object { $_ })
+        V4      = @("$v4" -split '[,\s\x00]+' | Where-Object { $_ })
+        V6      = @("$v6" -split '[,\s\x00]+' | Where-Object { $_ })
     }
 }
 
@@ -1830,7 +1834,8 @@ function Restore-DnsEinstellung {
         if ($t.Count -eq 2) { $w[$t[0]] = $t[1] }
     }
     if (-not $w['Adapter']) { Fail 'Sicherung unvollstaendig - der Adapter fehlt.'; return $false }
-    $statisch = @("$($w['IPv4']),$($w['IPv6'])" -split '[,\s]+' | Where-Object { $_ })
+    # \x00 auch hier: Sicherungen von v3.2 koennen die NUL-Zeichen noch enthalten.
+    $statisch = @("$($w['IPv4']),$($w['IPv6'])" -split '[,\s\x00]+' | Where-Object { $_ })
     try {
         # Erst alles auf "automatisch", dann die frueher von Hand gesetzten
         # Server wieder eintragen. So stimmt der Zustand auch dann exakt, wenn
@@ -2684,6 +2689,10 @@ function Action-H {
 # "Wann" beschreibt in einer Zeile, woran man erkennt, dass dieser Punkt der
 # richtige ist. Bewusst hier und nicht in der Aktion: die Beschreibung hilft
 # beim AUSWAEHLEN - danach ist sie nur noch Text, den niemand liest.
+#
+# "Backup" ist der Ordnername, unter dem der Fix sichert (New-BackupSet).
+# Gibt es dazu ein Backup, zeigt das Untermenue eine eigene Rueckgaengig-
+# Zeile. Punkte ohne "Backup" brauchen kein Rueckgaengig (Caches, Resets).
 $Script:Kategorien = @(
     @{
         Key    = '1'
@@ -2695,7 +2704,7 @@ $Script:Kategorien = @(
                Fix  = 'Action-2';  Undo = 'Action-2b' },
             @{ Text = 'Bild schwarz, aber Ton laeuft'
                Wann = 'Menuegeraeusche hoerbar, falscher Monitor'
-               Fix  = 'Action-3';  Undo = 'Action-3b' }
+               Fix  = 'Action-3';  Undo = 'Action-3b';  Backup = '3_Grafik' }
         )
     },
     @{
@@ -2705,16 +2714,16 @@ $Script:Kategorien = @(
         Punkte = @(
             @{ Text = 'Kein Ton, Knacken, Aussetzer'
                Wann = 'gar kein Ton, Knistern, auch nach dem Spiel kaputt'
-               Fix  = 'Action-4';  Undo = 'Action-4b'  },
+               Fix  = 'Action-4';  Undo = 'Action-4b';  Backup = '4_Audio' },
             @{ Text = 'Mikrofon geht nicht, Voice-Chat'
                Wann = 'keiner hoert dich, Mikro wird nicht erkannt'
-               Fix  = 'Action-5';  Undo = 'Action-5b'  },
+               Fix  = 'Action-5';  Undo = 'Action-5b';  Backup = '5_Mikrofon' },
             @{ Text = 'Bluetooth-Headset rauscht'
                Wann = 'dumpf oder blechern, klingt wie ein Telefon'
-               Fix  = 'Action-11'; Undo = 'Action-11b' },
+               Fix  = 'Action-11'; Undo = 'Action-11b'; Backup = '11_HandsFree' },
             @{ Text = 'Zu viele oder falsche Audiogeraete'
                Wann = 'Ton aus dem falschen Geraet, mehrere Mikrofone'
-               Fix  = 'Action-12'; Undo = 'Action-12b' }
+               Fix  = 'Action-12'; Undo = 'Action-12b'; Backup = '12_Geraete' }
         )
     },
     @{
@@ -2724,7 +2733,7 @@ $Script:Kategorien = @(
         Punkte = @(
             @{ Text = 'Login haengt, Anmeldung endlos'
                Wann = 'dreht sich im Kreis, Profil wird nicht geladen'
-               Fix  = 'Action-1';  Undo = 'Action-1b' }
+               Fix  = 'Action-1';  Undo = 'Action-1b';  Backup = '1_Profil' }
         )
     },
     @{
@@ -2734,13 +2743,13 @@ $Script:Kategorien = @(
         Punkte = @(
             @{ Text = 'Download fehlgeschlagen (HILLCAT)'
                Wann = 'haengt bei "Pruefung auf Update", Fehlercode HILLCAT'
-               Fix  = 'Action-13'; Undo = 'Action-13b' },
+               Fix  = 'Action-13'; Undo = 'Action-13b'; Backup = '13_Download' },
             @{ Text = 'Verbindungsfehler, Disconnects'
                Wann = 'Verbindung zum Host verloren, Warteschleife'
                Fix  = 'Action-6';  Undo = 'Action-6b' },
             @{ Text = 'Firewall blockiert das Spiel'
                Wann = 'kein Multiplayer, Onlinedienst nicht erreichbar'
-               Fix  = 'Action-8';  Undo = 'Action-8b' }
+               Fix  = 'Action-8';  Undo = 'Action-8b';  Backup = '8_Firewall' }
         )
     },
     @{
@@ -2753,7 +2762,7 @@ $Script:Kategorien = @(
                Fix  = 'Action-7';  Undo = 'Action-7b' },
             @{ Text = 'Spiel startet gar nicht'
                Wann = 'nichts passiert, Fenster geht auf und sofort zu'
-               Fix  = 'Action-9';  Undo = 'Action-9b' }
+               Fix  = 'Action-9';  Undo = 'Action-9b';  Backup = '9_Start' }
         )
     },
     @{
@@ -2763,7 +2772,7 @@ $Script:Kategorien = @(
         Punkte = @(
             @{ Text = 'Ruckeln, FPS-Einbrueche, Stottern'
                Wann = 'Mikroruckler, Eingabe verzoegert, System stottert'
-               Fix  = 'Action-10'; Undo = 'Action-10b' }
+               Fix  = 'Action-10'; Undo = 'Action-10b'; Backup = '10_Leistung' }
         )
     }
 )
@@ -2805,9 +2814,35 @@ function Show-MainMenu {
     Write-Host ""
 }
 
+# Liefert das Backup, das der Rueckgaengig-Punkt benutzen wuerde - aber nur,
+# wenn auch etwas darin liegt. Ein Fix legt seinen Ordner oft schon an, bevor
+# er etwas aendert; bricht man dann ab, bleibt er leer, und eine
+# Rueckgaengig-Zeile dafuer waere ein leeres Versprechen.
+function Get-RueckgaengigStand {
+    param([string]$Name)
+    if (-not $Name) { return $null }
+    $bk = Get-LatestBackup -Name $Name
+    if (-not $bk) { return $null }
+    $inhalt = Get-ChildItem -LiteralPath $bk.FullName -Force -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+    if (-not $inhalt) { return $null }
+    $zeit = $null
+    $stempel = $bk.Name.Substring($Name.Length + 1)
+    try {
+        $zeit = [datetime]::ParseExact($stempel, 'yyyyMMdd-HHmmss',
+                                       [Globalization.CultureInfo]::InvariantCulture)
+    } catch {}
+    [pscustomobject]@{ Ordner = $bk.FullName; Zeit = $zeit }
+}
+
 # Bewusst genauso aufgebaut wie das Hauptmenue: Zahl, Ueberschrift, darunter
 # grau die Erkennungsmerkmale. Wer das Hauptmenue verstanden hat, versteht
 # auch dieses - ohne umzudenken.
+#
+# Rueckgaengig steht als EIGENE Zeile unter dem Punkt, sobald es ein Backup
+# dafuer gibt. Ein Hinweis in der Fusszeile allein reicht nicht: Fixes sagen
+# am Ende "Menue 4, dann 1b" - steht 1b dann nirgends im Menue, glaubt man,
+# es gebe den Punkt nicht, und drueckt die 1.
 function Show-SubMenu {
     param($Kategorie)
     Show-Kopf
@@ -2817,10 +2852,18 @@ function Show-SubMenu {
     Write-Host "    WAS PASST AM BESTEN?" -ForegroundColor White
     Write-Host ""
     $i = 1
+    $mitRueckgaengig = $false
     foreach ($p in $Kategorie.Punkte) {
-        Write-Host "      $i  " -ForegroundColor Green -NoNewline
+        Write-Host ('{0,7}  ' -f $i) -ForegroundColor Green -NoNewline
         Write-Host $p.Text -ForegroundColor White
         if ($p.Wann) { Write-Host "         $($p.Wann)" -ForegroundColor DarkGray }
+        $stand = Get-RueckgaengigStand -Name $p.Backup
+        if ($stand) {
+            $mitRueckgaengig = $true
+            $wann = if ($stand.Zeit) { ' - zurueck auf den Stand vom ' + $stand.Zeit.ToString('dd.MM., HH:mm') } else { '' }
+            Write-Host ('{0,7}  ' -f "${i}b") -ForegroundColor Yellow -NoNewline
+            Write-Host "RUECKGAENGIG$wann" -ForegroundColor Yellow
+        }
         Write-Host ""
         $i++
     }
@@ -2829,7 +2872,12 @@ function Show-SubMenu {
     Write-Host "      0  " -ForegroundColor Cyan -NoNewline; Write-Host "Zurueck zum Hauptmenue" -ForegroundColor Gray
     Write-Host ""
     Write-Host "    ------------------------------------------------------------" -ForegroundColor DarkGray
-    Write-Host "     Zahl repariert  -  Zahl mit b macht rueckgaengig (z.B. 1b)" -ForegroundColor DarkGray
+    if ($mitRueckgaengig) {
+        Write-Host "     Zahl repariert  -  Zahl mit b macht rueckgaengig" -ForegroundColor DarkGray
+    } else {
+        Write-Host "     Nach einer Reparatur steht hier auch, wie du sie" -ForegroundColor DarkGray
+        Write-Host "     rueckgaengig machst." -ForegroundColor DarkGray
+    }
     Write-Host "    ------------------------------------------------------------" -ForegroundColor DarkGray
     Write-Host ""
 }
@@ -2843,7 +2891,7 @@ function Run-SubMenu {
 
         $undo = $false
         $nr   = $w
-        if ($w -match '^(\d+)b$') { $undo = $true; $nr = $Matches[1] }
+        if ($w -match '^(\d+)\s*b$') { $undo = $true; $nr = $Matches[1] }
 
         $idx = 0
         if ([int]::TryParse($nr, [ref]$idx) -and $idx -ge 1 -and $idx -le $Kategorie.Punkte.Count) {

@@ -8,7 +8,7 @@
 
 ![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6?style=for-the-badge&logo=windows&logoColor=white)
 ![PowerShell](https://img.shields.io/badge/PowerShell-5.1-5391FE?style=for-the-badge&logo=powershell&logoColor=white)
-![Version](https://img.shields.io/badge/Version-3.2-brightgreen?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-3.3-brightgreen?style=for-the-badge)
 ![Lizenz](https://img.shields.io/badge/Lizenz-MIT-blue?style=for-the-badge)
 
 ![Steam](https://img.shields.io/badge/Steam-✓-000000?style=flat-square&logo=steam&logoColor=white)
@@ -68,7 +68,7 @@
   ================================================================
 
       C A L L   O F   D U T Y   -   F I X - W E R K Z E U G
-                                                        v3.2
+                                                        v3.3
   ================================================================
 
     WO LIEGT DAS PROBLEM?
@@ -105,7 +105,7 @@ Das Untermenü ist **genauso aufgebaut** — Zahl, Überschrift, darunter grau d
   ================================================================
 
       C A L L   O F   D U T Y   -   F I X - W E R K Z E U G
-                                                        v3.2
+                                                        v3.3
   ================================================================
 
     TON / MIKROFON
@@ -121,6 +121,7 @@ Das Untermenü ist **genauso aufgebaut** — Zahl, Überschrift, darunter grau d
 
       3  Bluetooth-Headset rauscht
          dumpf oder blechern, klingt wie ein Telefon
+     3b  RUECKGAENGIG - zurueck auf den Stand vom 19.09., 09:47
 
       4  Zu viele oder falsche Audiogeraete
          Ton aus dem falschen Geraet, mehrere Mikrofone
@@ -130,9 +131,11 @@ Das Untermenü ist **genauso aufgebaut** — Zahl, Überschrift, darunter grau d
       0  Zurueck zum Hauptmenue
 
     ------------------------------------------------------------
-     Zahl repariert  -  Zahl mit b macht rueckgaengig (z.B. 1b)
+     Zahl repariert  -  Zahl mit b macht rueckgaengig
     ------------------------------------------------------------
 ```
+
+Hast du einen Punkt schon einmal repariert, steht direkt darunter die passende **Rückgängig-Zeile** (hier `3b`) samt Zeitpunkt des Backups. Sie erscheint nur, wenn es wirklich etwas zurückzuholen gibt.
 
 **Zwei Bildschirme, dann passiert etwas.** Die Erkennungsmerkmale stehen bewusst *im Menü* statt in der Aktion — dort helfen sie beim Auswählen, danach wären sie nur noch Text, den niemand liest. Kein Zwischenbildschirm mit „Taste drücken".
 
@@ -341,7 +344,7 @@ Darin: die Originaldateien samt `.pfad`-Datei mit dem Ursprungsort, Registry-Wer
 | | |
 |---|---|
 | **`A` im Hauptmenü** | macht alle Änderungen rückgängig |
-| **`b`-Optionen** | machen einzelne Änderungen rückgängig |
+| **`b`-Zeilen im Untermenü** | machen einzelne Änderungen rückgängig — sie erscheinen, sobald es dafür ein Backup gibt |
 
 Auch Werte, die es vorher **gar nicht gab**, werden vermerkt — beim Rückgängigmachen werden sie wieder entfernt statt auf einem erfundenen Standardwert stehenzubleiben.
 
