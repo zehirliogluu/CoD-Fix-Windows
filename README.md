@@ -8,7 +8,7 @@
 
 ![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6?style=for-the-badge&logo=windows&logoColor=white)
 ![PowerShell](https://img.shields.io/badge/PowerShell-5.1-5391FE?style=for-the-badge&logo=powershell&logoColor=white)
-![Version](https://img.shields.io/badge/Version-3.1-brightgreen?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-3.2-brightgreen?style=for-the-badge)
 ![Lizenz](https://img.shields.io/badge/Lizenz-MIT-blue?style=for-the-badge)
 
 ![Steam](https://img.shields.io/badge/Steam-✓-000000?style=flat-square&logo=steam&logoColor=white)
@@ -33,7 +33,7 @@
 
 ### **[➜ CoD-Fix.cmd herunterladen](https://github.com/zehirliogluu/CoD-Fix-Windows/releases/latest/download/CoD-Fix.cmd)**
 
-<sub>Eine Datei · rund 110 KB · keine Installation</sub>
+<sub>Eine Datei · rund 130 KB · keine Installation</sub>
 
 </div>
 
@@ -68,7 +68,7 @@
   ================================================================
 
       C A L L   O F   D U T Y   -   F I X - W E R K Z E U G
-                                                        v3.1
+                                                        v3.2
   ================================================================
 
     WO LIEGT DAS PROBLEM?
@@ -84,7 +84,7 @@
          Anmeldung haengt oder dreht sich im Kreis
 
       4  VERBINDUNG / INTERNET
-         Disconnects, Verbindungsfehler
+         haengt beim Update, Download-Fehler, Disconnects
 
       5  ABSTUERZE / STARTPROBLEME
          Spiel stuerzt ab oder startet gar nicht
@@ -105,7 +105,7 @@ Das Untermenü ist **genauso aufgebaut** — Zahl, Überschrift, darunter grau d
   ================================================================
 
       C A L L   O F   D U T Y   -   F I X - W E R K Z E U G
-                                                        v3.1
+                                                        v3.2
   ================================================================
 
     TON / MIKROFON
@@ -226,14 +226,28 @@ Beendet vorher Spiel **und** Launcher, damit nichts zurückgeschrieben wird.
 </details>
 
 <details>
-<summary><b>4 · Verbindung / Internet</b> — Disconnects, Verbindungsfehler</summary>
+<summary><b>4 · Verbindung / Internet</b> — hängt beim Update, Download-Fehler, Disconnects</summary>
 
 <br>
 
 | Problem | Was passiert |
 |---|---|
+| **Download fehlgeschlagen (HILLCAT)** | Prüft VPN, DNS-Filter, `hosts`-Datei und zwölf Spieladressen — und stellt den DNS nur um, wenn das sicher geht |
 | **Verbindungsfehler, Disconnects** | DNS-Cache leeren, Winsock zurücksetzen, TCP/IP-Stack zurücksetzen, IP erneuern |
 | **Firewall blockiert das Spiel** | Blockierende Regeln zeigen und **nach Rückfrage** entfernen, Freigaben für alle Spiel-EXEs anlegen (ein- und ausgehend) |
+
+**Warum „Prüfung auf Update" hängen bleibt:** Nach dem Start lädt Call of Duty eigene Datenpakete nach — unabhängig von Steam oder Battle.net. Scheitert das, bleibt der Balken stehen oder es erscheint **Fehlercode HILLCAT**. Eine Neuinstallation hilft dann fast nie, denn es liegt am **Weg** zu den Activision-Servern. Die Aktion prüft ihn der Reihe nach:
+
+| Prüfung | Befund | Was passiert |
+|---|---|---|
+| `hosts`-Datei | Spieladressen umgeleitet | Zeigt die Zeilen, öffnet die Datei im Editor — gelöscht wird nichts automatisch |
+| VPN | aktiv (erkannt an der Umleitung des gesamten Verkehrs) | Anleitung für den Vergleich mit und ohne VPN. **Der DNS wird dann nicht angefasst** — das VPN hat ihn selbst gesetzt |
+| DNS-Filter (AdGuard, Pi-hole, NextDNS) | sperrt Spieladressen | Nennt genau diese Adressen, samt Schreibweise für die Freigabeliste |
+| DNS-Filter | sperrt keine bekannte Adresse | Anleitung, im Abfrageprotokoll des Filters nach der Sperre zu suchen |
+| DNS | von Hand gesetzt, antwortet nicht | Bietet an, ihn auf „automatisch" zurückzusetzen — oft Rest eines getrennten VPNs |
+| alles unauffällig | — | Bietet Cloudflare (1.1.1.1) als DNS an — der häufigste Fix für HILLCAT |
+
+Beim Umstellen merkt sich das Werkzeug, ob dein DNS vorher **von Hand eingetragen** war oder **automatisch** vom Router kam, und stellt mit `13b` exakt diesen Zustand wieder her. Löst nach der Umstellung nichts mehr auf, wird **sofort automatisch zurückgestellt**.
 
 Vor jeder Firewall-Änderung wird die **komplette Regelsammlung** gesichert — damit lässt sich das Entfernen einer Blockade später wirklich zurücknehmen.
 

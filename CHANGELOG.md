@@ -4,6 +4,22 @@ Alle nennenswerten Änderungen an CoD-Fix. Neueste Fassung zuerst.
 
 ---
 
+## v3.2
+
+### Behobene Fehler
+
+- **Jede Reparatur beendete Visual Studio Code — samt ungespeicherter Arbeit.** Die Prozesssuche prüfte mit `'^cod'` nur den Namensanfang, und VS Code heißt als Prozess `Code`. Betroffen war fast jede Aktion, weil fast jede vorher das Spiel beendet. Gefunden wird jetzt in erster Linie über den **Pfad** (alles, was aus einem CoD-Spielordner läuft); die Namensliste ist nur noch Rückfallebene und exakt verankert.
+- **Der Launcher-Name `Agent` traf fremde Programme.** Beendet wird jetzt nur noch der `Agent` aus dem Battle.net-Ordner.
+- **Das Firewall-Suchmuster traf `Code.exe` und `codec.exe`.** Nach `cod` muss jetzt direkt `.exe`, eine Ziffer oder ein Bindestrich folgen.
+
+### Neu
+
+- **Download fehlgeschlagen (HILLCAT) / hängt bei „Prüfung auf Update".** Prüft der Reihe nach `hosts`-Datei, VPN, DNS-Filter (AdGuard, Pi-hole, NextDNS) und zwölf Spieladressen gegen einen unabhängigen DNS. Stellt den DNS auf Cloudflare nur um, wenn das sicher geht — bei aktivem VPN bewusst nicht, weil das VPN ihn selbst gesetzt hat. Merkt sich, ob der DNS vorher von Hand gesetzt oder automatisch war, und rollt sofort zurück, falls danach nichts mehr auflöst.
+- **Diagnose** zeigt jetzt auch VPN, DNS-Filter, gesperrte Spieladressen und Einträge in der `hosts`-Datei.
+- **Hilfe-Menü:** Steam-Dateiprüfung direkt startbar (`steam://validate/1938090`).
+
+---
+
 ## v3.1
 
 ### Behobene Fehler
