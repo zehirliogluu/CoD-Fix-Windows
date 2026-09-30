@@ -1,6 +1,6 @@
 <#
 ================================================================================
-  CALL OF DUTY - FIX-WERKZEUG  v3.3
+  CALL OF DUTY - FIX-WERKZEUG  v3.4
   Behebt die haeufigsten PC-Probleme: haengender Login, Schwarzbild,
   Tonprobleme, Dev-/DirectX-Fehler, Verbindungsabbrueche.
 
@@ -29,7 +29,7 @@
 #>
 
 $ErrorActionPreference = 'Continue'
-$Script:Version = '3.3'
+$Script:Version = '3.4'
 
 # ============================== GRUNDLAGEN ====================================
 
@@ -1845,14 +1845,226 @@ function Set-DnsZiel {
     return $false
 }
 
+# --- Zertifikatspruefung (Sperrlisten) ---------------------------------------
+# Bei jeder verschluesselten Verbindung prueft Windows, ob das Zertifikat der
+# Gegenstelle zurueckgezogen wurde. Dafuer laedt es eine Sperrliste (CRL) oder
+# fragt einen OCSP-Server - ueber Port 80 und am Programm vorbei. Klappt das
+# nicht rechtzeitig, meldet Windows 0x80092013 (die Sperrauskunft war nicht
+# erreichbar), und das Spiel bricht den Download ab: HILLCAT.
+#
+# Das Zeitbudget ist knapp bemessen: 15 Sekunden je Abruf, 20 Sekunden fuer
+# alle zusammen. Die Sperrliste von DigiCert - die auch hinter den
+# Spielservern steht - ist ueber 10 MB gross und braucht auf einer normalen
+# Leitung mehrere Sekunden. Laeuft daneben der Download mit voller
+# Geschwindigkeit, reicht die Zeit nicht. Das erklaert beides: warum es
+# ausgerechnet nach Updates klemmt und warum es spaeter "ploetzlich" geht -
+# dann liegt die Antwort im Zwischenspeicher von Windows.
+$Script:KettenConfig = 'HKLM:\SOFTWARE\Microsoft\Cryptography\OID\EncodingType 0\CertDllCreateCertificateChainEngine\Config'
+$Script:KettenZeiten = [ordered]@{
+    ChainUrlRetrievalTimeoutMilliseconds               = 30000
+    ChainRevAccumulativeUrlRetrievalTimeoutMilliseconds = 60000
+}
+
+# Nur Spieladressen, die wirklich per HTTPS antworten - fuer die anderen gibt
+# es kein Zertifikat zu pruefen.
+$Script:TlsZiele = @('cdn.callofduty.com','s.activision.com','www.callofduty.com',
+                     'level3.blizzard.com','blzddist1-a.akamaihd.net')
+
+# Adressen, unter denen die Sperrauskunft selbst liegt. Die stehen NICHT in
+# den Spieladressen und fallen deshalb bei jeder normalen Pruefung durch das
+# Raster - ein DNS-Filter kann sie sperren, waehrend alle Spieladressen
+# sauber aufloesen. Genau so war es bei dem Fall, der diese Pruefung
+# ausgeloest hat: der Server der Anmeldung (demonware) wird von GeoTrust
+# beglaubigt, und status.geotrust.com stand auf einer Sperrliste.
+# Die Liste ergaenzt die Adressen, die aus den erreichbaren Zertifikaten
+# gelesen werden - denn ausgerechnet der Server, an dem es klemmt, ist
+# haeufig der, den man gerade nicht erreicht.
+$Script:SperrAuskunft = @(
+    'status.geotrust.com','ss.symcd.com','sr.symcb.com','status.thawte.com',
+    'ocsp.digicert.com','crl3.digicert.com','crl4.digicert.com','cacerts.digicert.com',
+    'ocsp.pki.goog','c.pki.goog',
+    'ocsp.r2m01.amazontrust.com','crl.r2m01.amazontrust.com','ocsp.rootca1.amazontrust.com',
+    'ocsp.sectigo.com','crl.sectigo.com','ocsp.globalsign.com'
+)
+
+# Holt das Zertifikat und prueft die Kette GENAU SO, wie Windows es fuer das
+# Spiel tut. Das fuellt nebenbei den Zwischenspeicher von Windows: gelingt die
+# Pruefung hier, ist sie beim naechsten Spielstart sofort erledigt.
+function Test-Zertifikatsweg {
+    param([string[]]$Adressen, [int]$Zeitlimit = 20)
+    $erg = @()
+    foreach ($h in $Adressen) {
+        $tcp = New-Object Net.Sockets.TcpClient
+        $ok = $false; $ms = 0; $status = ''; $urls = @()
+        try {
+            $warte = $tcp.BeginConnect($h, 443, $null, $null)
+            if (-not $warte.AsyncWaitHandle.WaitOne(6000)) { throw 'keine Verbindung auf Port 443' }
+            $tcp.EndConnect($warte)
+            # Hier wird das Zertifikat nur geholt, deshalb wird es an dieser
+            # Stelle durchgewunken. Geprueft wird es gleich darauf richtig.
+            $ssl = New-Object Net.Security.SslStream($tcp.GetStream(), $false, { param($a,$b,$c,$d) $true })
+            $ssl.AuthenticateAsClient($h)
+            $cert  = New-Object Security.Cryptography.X509Certificates.X509Certificate2 $ssl.RemoteCertificate
+            $kette = New-Object Security.Cryptography.X509Certificates.X509Chain
+            $kette.ChainPolicy.RevocationMode      = 'Online'
+            $kette.ChainPolicy.RevocationFlag      = 'EntireChain'
+            $kette.ChainPolicy.UrlRetrievalTimeout = [TimeSpan]::FromSeconds($Zeitlimit)
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $ok = $kette.Build($cert)
+            $ms = [int]$sw.ElapsedMilliseconds
+            $status = (($kette.ChainStatus | ForEach-Object { $_.Status }) -join ', ')
+            foreach ($el in $kette.ChainElements) {
+                foreach ($x in $el.Certificate.Extensions) {
+                    # 1.3.6.1.5.5.7.1.1 = OCSP-Auskunft, 2.5.29.31 = Sperrlisten
+                    if ($x.Oid.Value -in '1.3.6.1.5.5.7.1.1','2.5.29.31') {
+                        $urls += ([regex]::Matches($x.Format($true), 'https?://[^\s,\)]+') | ForEach-Object { $_.Value })
+                    }
+                }
+            }
+        } catch { $status = $_.Exception.Message }
+        finally { try { $tcp.Close() } catch {} }
+        $adr = @()
+        foreach ($u in ($urls | Select-Object -Unique)) { try { $adr += ([uri]$u).Host } catch {} }
+        $erg += [pscustomobject]@{
+            Adresse = $h
+            Ok      = $ok
+            Ms      = $ms
+            Status  = $status
+            Hosts   = @($adr | Select-Object -Unique)
+        }
+    }
+    return $erg
+}
+
+# Windows schreibt jeden misslungenen Versuch ins Systemprotokoll: Quelle
+# Schannel, Ereignis 36876. Gezaehlt werden nur die des Spiels - dieselbe
+# Meldung kommt auch von anderen Programmen und ist dort meist folgenlos.
+function Get-Sperrfehler {
+    param([int]$Tage = 14)
+    try {
+        $ev = @(Get-WinEvent -FilterHashtable @{
+            LogName = 'System'; ProviderName = 'Schannel'; Id = 36876
+            StartTime = (Get-Date).AddDays(-$Tage)
+        } -ErrorAction Stop)
+    } catch {
+        # "Keine Ereignisse gefunden" ist keine Stoerung, sondern ein Befund.
+        if ("$($_.Exception.Message)" -match 'Keine Ereignisse|No events') {
+            return [pscustomobject]@{ Anzahl = 0; Letzter = $null; Tage = $Tage }
+        }
+        return $null
+    }
+    $zeiten = @()
+    foreach ($e in $ev) {
+        try {
+            $d = @{}
+            foreach ($n in ([xml]$e.ToXml()).Event.EventData.Data) { $d[$n.Name] = "$($n.'#text')" }
+            if (($d['ErrorCode'] -eq '0x80092013') -and
+                ($d['CallerProcessImageName'] -match '^(cod|bootstrapper|BlackOps|ModernWarfare)')) {
+                $zeiten += $e.TimeCreated
+            }
+        } catch {}
+    }
+    return [pscustomobject]@{
+        Anzahl  = $zeiten.Count
+        Letzter = ($zeiten | Sort-Object | Select-Object -Last 1)
+        Tage    = $Tage
+    }
+}
+
+# Windows merkt sich jede Sperrauskunft. Ist eine gespeicherte Antwort
+# abgelaufen und der Auskunftsserver gerade nicht erreichbar, verwirft Windows
+# sie und meldet "Sperrserver offline" - ohne es noch einmal zu versuchen.
+# Nach einer Freigabe im DNS-Filter bleibt es deshalb kaputt, bis der alte
+# Eintrag weg ist. Gesichert werden muss davor nichts: Windows holt sich alles
+# beim naechsten Bedarf neu.
+function Clear-Sperrspeicher {
+    return (Invoke-Tool -Was 'Gespeicherte Sperrauskuenfte verworfen' `
+                        -Datei 'certutil.exe' -Argumente @('-urlcache','*','delete'))
+}
+
+# Gibt der Sperrpruefung mehr Zeit. Das schwaecht nichts ab - geprueft wird
+# weiter, nur mit mehr Geduld. Werte, die es vorher nicht gab, stehen mit
+# leerem Wert in der Sicherung und werden beim Zurueckstellen entfernt.
+function Set-KettenZeitbudget {
+    param([string]$Datei)
+    try {
+        if (-not (Test-Path $Script:KettenConfig)) { New-Item -Path $Script:KettenConfig -Force | Out-Null }
+        foreach ($n in $Script:KettenZeiten.Keys) {
+            Save-RegValue -Pfad $Script:KettenConfig -Name $n -Datei $Datei
+            Set-ItemProperty -Path $Script:KettenConfig -Name $n -Value $Script:KettenZeiten[$n] -Type DWord -ErrorAction Stop
+        }
+        Ok 'Zeitbudget erhoeht: 30 s je Abruf, 60 s zusammen (vorher 15 und 20).'
+        Info 'Gilt ab dem naechsten Spielstart.'
+        return $true
+    } catch {
+        Fail "Zeitbudget liess sich nicht setzen - $($_.Exception.Message)"
+        return $false
+    }
+}
+
+# Der DNS-Schritt aus Aktion 13. Eigene Funktion, weil er als einziger
+# Schritt bei aktivem VPN ausfaellt - alles danach laeuft weiter.
+# Uebergeben und zurueckgegeben wird der Sicherungsordner: angelegt wird er
+# erst, wenn wirklich etwas geaendert wird, und dann nur einmal je Durchlauf.
+function Invoke-DnsSchritt {
+    param($Befund, [string]$Backup)
+    $bk = $Backup
+    $ad = Get-ActiveAdapter
+    if (-not $ad) { Fail 'Kein aktiver Netzwerkadapter gefunden.'; return $bk }
+    $jetzt = Get-DnsEinstellung -Adapter $ad
+    $istCloudflare = ($jetzt -and ($jetzt.V4 -contains '1.1.1.1'))
+
+    Write-Host ""
+    if ($istCloudflare) {
+        # Nicht ein zweites Mal umstellen: die zweite Sicherung wuerde den
+        # Cloudflare-Stand festhalten - und das Original waere verloren.
+        Ok 'DNS steht bereits auf Cloudflare (1.1.1.1).'
+        Info 'Zurueck zum vorherigen Stand: Menue 4, dann 1b.'
+    } elseif ((-not $Befund.DnsLebt) -and ($jetzt.V4.Count -gt 0)) {
+        # Von Hand eingetragener DNS, der nicht antwortet - typischer Rest
+        # eines VPNs, das beim Trennen nicht aufgeraeumt hat.
+        Warn "Von Hand eingetragen ist $($jetzt.V4 -join ', ') - und der antwortet nicht."
+        Info 'Das ist oft ein Rest eines VPNs, das beim Trennen nicht'
+        Info 'aufgeraeumt hat. Richtig ist dann: DNS wieder automatisch'
+        Info 'vom Router beziehen.'
+        if (Frage-JaNein "     DNS auf automatisch zuruecksetzen? (j/n)") {
+            if (-not $bk) { $bk = New-BackupSet -Name '13_Download' }
+            $null = Set-DnsZiel -Adapter $ad -Ziel 'Automatisch' -Datei (Join-Path $bk 'dns.txt')
+        }
+    } else {
+        $aktuell = 'automatisch (vom Router)'
+        if ($jetzt.V4.Count -gt 0) { $aktuell = ($jetzt.V4 -join ', ') + ' (von Hand eingetragen)' }
+        Info "Dein DNS jetzt: $aktuell"
+        Info 'Der haeufigste Fix fuer HILLCAT ist ein anderer DNS-Server. Dein'
+        Info 'Anbieter schickt dich sonst zu einem Verteilknoten, der klemmen'
+        Info 'kann. Cloudflare (1.1.1.1) ist schnell und protokolliert nichts.'
+        if ($Befund.Filter) {
+            Warn 'Achtung: damit umgehst du deinen DNS-Filter an diesem PC.'
+            Info 'Als Test ist das ideal - laeuft es danach, liegt es am Filter.'
+        }
+        Info 'Rueckgaengig jederzeit: Menue 4, dann 1b - exakt auf den jetzigen Stand.'
+        if (Frage-JaNein "     DNS auf Cloudflare umstellen? (j/n)") {
+            if (-not $bk) { $bk = New-BackupSet -Name '13_Download' }
+            $null = Set-DnsZiel -Adapter $ad -Ziel 'Cloudflare' -Datei (Join-Path $bk 'dns.txt')
+        }
+    }
+    return $bk
+}
+
 function Action-13 {
     Titel '13' 'DOWNLOAD FEHLGESCHLAGEN (HILLCAT)'
     Info 'HILLCAT heisst: das Spiel konnte seine EIGENEN Daten nicht laden.'
     Info 'Das ist nicht der Steam-Download - deshalb hilft neu installieren'
     Info 'fast nie. Es liegt am Weg zu den Activision-Servern.'
+    Info 'Die Zahlen unter dem Code sind eine interne Kennung und die Uhrzeit'
+    Info 'des Fehlers. Sie helfen nur dem Kundendienst, nicht bei der Suche.'
     Write-Host ""
 
     Stop-GameAndLaunchers
+
+    # Erst anlegen, wenn wirklich etwas geaendert wird - und dann nur einmal
+    # je Durchlauf, damit DNS und Zeitbudget in derselben Sicherung landen.
+    $bk = $null
 
     Say "      Verbindungsweg pruefen..." 'Gray'
     $e = Test-SpielVerbindung -CacheLeeren
@@ -1899,7 +2111,6 @@ function Action-13 {
         )
         Info 'Den DNS stelle ich bei aktivem VPN bewusst NICHT um: das VPN hat'
         Info 'ihn selbst gesetzt, eine Aenderung wuerde mit ihm kollidieren.'
-        return
     }
 
     # --- 3. Gesperrte Spieladressen in einem DNS-Filter ---
@@ -1929,48 +2140,110 @@ function Action-13 {
         )
     }
 
-    # --- 4. DNS umstellen - zum Testen oder als eigentliche Loesung ---
-    $ad = Get-ActiveAdapter
-    if (-not $ad) { Fail 'Kein aktiver Netzwerkadapter gefunden.'; return }
-    $jetzt = Get-DnsEinstellung -Adapter $ad
-    $istCloudflare = ($jetzt -and ($jetzt.V4 -contains '1.1.1.1'))
+    # --- 4. DNS umstellen: nur ohne VPN, der Rest laeuft weiter ---
+    # Frueher endete die Aktion bei aktivem VPN hier. Das war zu frueh: die
+    # Zertifikatspruefung danach hat mit dem DNS nichts zu tun und ist gerade
+    # mit VPN interessant. Uebersprungen wird deshalb nur dieser Schritt.
+    if ($e.Vpn.Count -eq 0) { $bk = Invoke-DnsSchritt -Befund $e -Backup $bk }
 
+    # --- 5. Zertifikatspruefung: der stille Abbrecher ---
+    # Diese Pruefung findet nichts am DNS und nichts an der Leitung - sie
+    # scheitert an einer Nebensache, die niemand sieht. Genau deshalb steht
+    # sie hier: wer bis hierhin gekommen ist, hat den Rest schon geprueft.
     Write-Host ""
-    if ($istCloudflare) {
-        # Nicht ein zweites Mal umstellen: die zweite Sicherung wuerde den
-        # Cloudflare-Stand festhalten - und das Original waere verloren.
-        Ok 'DNS steht bereits auf Cloudflare (1.1.1.1).'
-        Info 'Zurueck zum vorherigen Stand: Menue 4, dann 1b.'
-    } elseif ((-not $e.DnsLebt) -and ($jetzt.V4.Count -gt 0)) {
-        # Von Hand eingetragener DNS, der nicht antwortet - typischer Rest
-        # eines VPNs, das beim Trennen nicht aufgeraeumt hat.
-        Warn "Von Hand eingetragen ist $($jetzt.V4 -join ', ') - und der antwortet nicht."
-        Info 'Das ist oft ein Rest eines VPNs, das beim Trennen nicht'
-        Info 'aufgeraeumt hat. Richtig ist dann: DNS wieder automatisch'
-        Info 'vom Router beziehen.'
-        if (Frage-JaNein "     DNS auf automatisch zuruecksetzen? (j/n)") {
-            $bk = New-BackupSet -Name '13_Download'
-            $null = Set-DnsZiel -Adapter $ad -Ziel 'Automatisch' -Datei (Join-Path $bk 'dns.txt')
-        }
-    } else {
-        $aktuell = 'automatisch (vom Router)'
-        if ($jetzt.V4.Count -gt 0) { $aktuell = ($jetzt.V4 -join ', ') + ' (von Hand eingetragen)' }
-        Info "Dein DNS jetzt: $aktuell"
-        Info 'Der haeufigste Fix fuer HILLCAT ist ein anderer DNS-Server. Dein'
-        Info 'Anbieter schickt dich sonst zu einem Verteilknoten, der klemmen'
-        Info 'kann. Cloudflare (1.1.1.1) ist schnell und protokolliert nichts.'
-        if ($e.Filter) {
-            Warn 'Achtung: damit umgehst du deinen DNS-Filter an diesem PC.'
-            Info 'Als Test ist das ideal - laeuft es danach, liegt es am Filter.'
-        }
-        Info 'Rueckgaengig jederzeit: Menue 4, dann 1b - exakt auf den jetzigen Stand.'
-        if (Frage-JaNein "     DNS auf Cloudflare umstellen? (j/n)") {
-            $bk = New-BackupSet -Name '13_Download'
-            $null = Set-DnsZiel -Adapter $ad -Ziel 'Cloudflare' -Datei (Join-Path $bk 'dns.txt')
+    Say "      Zertifikatspruefung testen (das dauert ein paar Sekunden)..." 'Gray'
+    $sp = Get-Sperrfehler -Tage 14
+    $tz = Test-Zertifikatsweg -Adressen $Script:TlsZiele
+    $gut     = @($tz | Where-Object { $_.Ok })
+    $kaputt  = @($tz | Where-Object { -not $_.Ok })
+    $langsam = @($tz | Where-Object { $_.Ok -and ($_.Ms -ge 5000) })
+
+    if ($gut.Count -gt 0) {
+        Ok "Zertifikate geprueft: $($gut.Count) von $($tz.Count) Spielservern in Ordnung"
+        Info 'Der Zwischenspeicher von Windows ist damit gefuellt - beim'
+        Info 'naechsten Spielstart ist die Pruefung sofort erledigt.'
+    }
+    foreach ($k in $kaputt)  { Fail "$($k.Adresse): $($k.Status)" }
+    foreach ($l in $langsam) { Warn ("{0}: die Pruefung dauerte {1} Sekunden" -f $l.Adresse, [int]($l.Ms / 1000)) }
+
+    # Geprueft wird beides: die Adressen aus den Zertifikaten der erreichbaren
+    # Server UND die feste Liste. Als gesperrt gilt eine Adresse nur, wenn ein
+    # unabhaengiger DNS sie kennt - sonst waere jede abgeschaltete Adresse ein
+    # Fehlalarm.
+    $auskunft = @(@($tz | ForEach-Object { $_.Hosts }) + $Script:SperrAuskunft | Select-Object -Unique)
+    $sperrTot = @()
+    foreach ($h in $auskunft) {
+        $a = Resolve-Probe -Name $h
+        if ($a -match '^\d') { continue }
+        if ($a -eq 'gesperrt') { $sperrTot += $h }
+        elseif ($e.Kontrolle -and ((Resolve-Probe -Name $h -Server $e.Kontrolle) -match '^\d')) { $sperrTot += $h }
+    }
+    if ($sperrTot.Count -gt 0) {
+        Write-Host ""
+        Fail 'Dein DNS sperrt Auskunftsserver fuer Zertifikate:'
+        foreach ($h in $sperrTot) { Info "  $h" }
+        Info 'Diese Adressen gehoeren nicht dem Spiel. Windows fragt dort nach,'
+        Info 'ob das Zertifikat des Spielservers noch gueltig ist. Kommt keine'
+        Info 'Antwort, bricht die Verbindung ab - obwohl alle Spieladressen'
+        Info 'einwandfrei aufloesen. Deshalb faellt das sonst niemandem auf.'
+        Zeige-Schritte -Ueberschrift 'AUCH DIESE ADRESSEN FREIGEBEN' -Schritte @(
+            'Oeffne die Oberflaeche deines Filters (AdGuard Home, Pi-hole ...)',
+            'Gehe zu den eigenen Filterregeln oder zur Freigabeliste',
+            'Trage die Adressen von oben ein',
+            'Speichern'
+        )
+        Info 'Schreibweise fuer AdGuard Home, je Adresse eine Zeile:'
+        foreach ($h in $sperrTot) { Info "  @@||$h^`$important" }
+        Write-Host ""
+        Warn 'Danach reicht ein Neustart des Spiels nicht.'
+        Info 'Windows hat die alte, abgelaufene Auskunft gespeichert und fragt'
+        Info 'nicht von selbst neu nach. Der Eintrag muss weg.'
+        if (Frage-JaNein "     Gespeicherte Sperrauskuenfte jetzt verwerfen? (j/n)") {
+            $null = Clear-Sperrspeicher
+            Info 'Windows holt sie beim naechsten Bedarf neu. Zurueckzunehmen'
+            Info 'gibt es hier nichts - es war nur ein Zwischenspeicher.'
         }
     }
 
-    # --- 5. Spieldateien von Steam pruefen lassen ---
+    if ($sp -and ($sp.Anzahl -gt 0)) {
+        Write-Host ""
+        Warn ("Windows konnte in {0} Tagen {1}x nicht pruefen, ob das Zertifikat" -f $sp.Tage, $sp.Anzahl)
+        Warn ("eines Spielservers noch gueltig ist - zuletzt am {0}." -f $sp.Letzter.ToString('dd.MM. HH:mm'))
+        Info 'Das ist der haeufigste stille Grund fuer HILLCAT: die Auskunft'
+        Info 'kommt nicht rechtzeitig, das Spiel bricht den Download ab.'
+        Info 'Windows gibt ihr nur 15 Sekunden - die Sperrliste ist ueber'
+        Info '10 MB gross, und daneben laeuft dein Download.'
+        Write-Host ""
+        Info 'Ich kann diese Frist verlaengern. Geprueft wird weiterhin alles,'
+        Info 'nur mit mehr Geduld - es wird nichts abgeschaltet.'
+        $jetzt = Get-ItemProperty -Path $Script:KettenConfig -ErrorAction SilentlyContinue
+        $steht = $jetzt -and ($jetzt.ChainUrlRetrievalTimeoutMilliseconds -ge $Script:KettenZeiten['ChainUrlRetrievalTimeoutMilliseconds'])
+        if ($steht) {
+            Ok 'Die Frist ist bereits verlaengert.'
+        } else {
+            Info 'Rueckgaengig jederzeit: Menue 4, dann 1b.'
+            if (Frage-JaNein "     Frist fuer die Zertifikatspruefung verlaengern? (j/n)") {
+                if (-not $bk) { $bk = New-BackupSet -Name '13_Download' }
+                $null = Set-KettenZeitbudget -Datei (Join-Path $bk 'reg.txt')
+            }
+        }
+        # Eine abgelaufene gespeicherte Auskunft scheitert in Millisekunden,
+        # ohne dass Windows es noch einmal versucht. Mehr Zeit hilft dagegen
+        # nicht - nur der Eintrag muss weg. Nur fragen, wenn es oben nicht
+        # schon wegen gesperrter Adressen angeboten wurde.
+        if ($sperrTot.Count -eq 0) {
+            Write-Host ""
+            Info 'Moeglich ist auch eine abgelaufene gespeicherte Auskunft.'
+            Info 'Dann gibt Windows sofort auf, ohne neu nachzufragen.'
+            if (Frage-JaNein "     Gespeicherte Sperrauskuenfte verwerfen? (j/n)") {
+                $null = Clear-Sperrspeicher
+            }
+        }
+    } elseif ($sp) {
+        Ok "keine fehlgeschlagene Zertifikatspruefung in den letzten $($sp.Tage) Tagen"
+    }
+
+    # --- 6. Spieldateien von Steam pruefen lassen ---
     $steamCod = $false
     foreach ($lib in Get-SteamLibraries) {
         if (Test-Path (Join-Path $lib 'steamapps\appmanifest_1938090.acf')) { $steamCod = $true }
@@ -1988,14 +2261,269 @@ function Action-13 {
     Info 'Mal mehrere Minuten stehen bleiben - das ist normal, nicht abbrechen.'
 }
 
+# Aktion 13 aendert zweierlei, und selten beides am selben Tag. Die juengste
+# Sicherung reicht deshalb nicht: sie kann den DNS enthalten und das
+# Zeitbudget nicht - oder umgekehrt. Gesucht wird je Datei die juengste
+# Sicherung, in der sie wirklich liegt.
+function Get-SicherungsDatei {
+    param([string]$Name, [string]$Datei)
+    if (-not (Test-Path $Script:BackupRoot)) { return $null }
+    $ordner = @(Get-ChildItem $Script:BackupRoot -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like "$Name`_*" } | Sort-Object Name -Descending)
+    foreach ($o in $ordner) {
+        $p = Join-Path $o.FullName $Datei
+        if (Test-Path $p) { return $p }
+    }
+    return $null
+}
+
 function Action-13b {
-    Titel '13b' 'DNS WIEDER ZURUECKSTELLEN'
-    $bk = Get-LatestBackup -Name '13_Download'
-    if (-not $bk) { Info 'Der DNS wurde von diesem Werkzeug nie umgestellt.'; return }
-    $f = Join-Path $bk.FullName 'dns.txt'
-    if (-not (Test-Path $f)) { Info 'In der letzten Sicherung wurde der DNS nicht veraendert.'; return }
-    $null = Restore-DnsEinstellung -Datei $f
+    Titel '13b' 'DOWNLOAD-AENDERUNGEN RUECKGAENGIG'
+    $getan = 0
+
+    $dns = Get-SicherungsDatei -Name '13_Download' -Datei 'dns.txt'
+    if ($dns) { if (Restore-DnsEinstellung -Datei $dns) { $getan++ } }
+    else      { Info 'Der DNS wurde von diesem Werkzeug nie umgestellt.' }
+
+    $reg = Get-SicherungsDatei -Name '13_Download' -Datei 'reg.txt'
+    if ($reg) {
+        $n = Restore-RegValues -Datei $reg -Typ DWord
+        Ok "Frist fuer die Zertifikatspruefung zurueckgestellt ($n Werte)."
+        $getan++
+    } else {
+        Info 'Die Frist fuer die Zertifikatspruefung wurde nie veraendert.'
+    }
+
+    if ($getan -eq 0) { Info 'Es gab hier also nichts zurueckzunehmen.' }
     Info 'Eine hosts-Datei und ein VPN hat diese Aktion nie angefasst.'
+}
+
+# ===================== 14  URSACHE AUFZEICHNEN ================================
+#
+# Der Ausweg, wenn Punkt 1 nichts findet und HILLCAT trotzdem kommt.
+#
+# Windows fuehrt ein ausfuehrliches Protokoll ueber jede Zertifikatspruefung
+# (CAPI2). Es ist ab Werk aus, weil es viel schreibt. Angeschaltet nennt es
+# GENAU, welches Zertifikat geprueft wurde, bei welchem Server nachgefragt
+# werden sollte und warum es scheiterte.
+#
+# Der Kniff ist die Verknuepfung zweier Protokolle: das Systemprotokoll sagt,
+# WANN das Spiel gescheitert ist (Schannel 36876, Prozess cod), das CAPI2-
+# Protokoll sagt, WAS in derselben Sekunde geprueft wurde. Die Pruefung selbst
+# laeuft naemlich nicht im Spiel, sondern in lsass - ohne diese Verknuepfung
+# waere nicht zu erkennen, welcher Eintrag zum Spiel gehoert.
+$Script:CapiLog = 'Microsoft-Windows-CAPI2/Operational'
+
+function Set-CapiProtokoll {
+    param([ValidateSet('An','Aus')][string]$Zustand)
+    $ein = if ($Zustand -eq 'An') { 'true' } else { 'false' }
+    try { $null = & wevtutil.exe sl $Script:CapiLog "/e:$ein" '/ms:52428800' '/rt:false' 2>&1 } catch { return $false }
+    if ($LASTEXITCODE -ne 0) { return $false }
+    if ($Zustand -eq 'An') { try { $null = & wevtutil.exe cl $Script:CapiLog 2>&1 } catch {} }
+    return $true
+}
+
+# Fasst die Ereignisse zusammen, die zu einer Pruefung gehoeren. Windows
+# verteilt sie auf mehrere Eintraege: einer nennt das Ergebnis, ein anderer
+# die Adresse der Auskunft. Zusammengehalten werden sie von der TaskId.
+function Get-CapiBefund {
+    param([datetime]$Von, [datetime]$Bis)
+    try {
+        $roh = @(Get-WinEvent -FilterHashtable @{ LogName = $Script:CapiLog; StartTime = $Von; EndTime = $Bis } -ErrorAction Stop)
+    } catch { return $null }
+    return (Group-CapiEreignisse -Ereignisse $roh)
+}
+
+# Getrennt vom Lesen, damit sich die Auswertung auch auf eine ausgelagerte
+# Protokolldatei anwenden laesst - und damit sie pruefbar ist.
+function Group-CapiEreignisse {
+    param($Ereignisse)
+    $gruppen = @{}
+    foreach ($ev in @($Ereignisse)) {
+        $x = $ev.ToXml()
+        $tid = ([regex]::Match($x, "TaskId='([^']+)'")).Groups[1].Value
+        if (-not $tid) { continue }
+        if (-not $gruppen.ContainsKey($tid)) {
+            $gruppen[$tid] = [pscustomobject]@{
+                Zeit = $ev.TimeCreated; Code = ''; Prozess = ''
+                Zertifikate = @(); Urls = @(); Gruende = @()
+            }
+        }
+        $g = $gruppen[$tid]
+        $m = [regex]::Match($x, "<Result value='(8009[0-9a-fA-F]{4})'")
+        if ($m.Success) { $g.Code = $m.Groups[1].Value; $g.Zeit = $ev.TimeCreated }
+        $p = ([regex]::Match($x, "ProcessName='([^']+)'")).Groups[1].Value
+        if ($p -and (-not $g.Prozess)) { $g.Prozess = $p }
+        foreach ($s in ([regex]::Matches($x, "subjectName='([^']+)'") | ForEach-Object { $_.Groups[1].Value })) {
+            if ($g.Zertifikate -notcontains $s) { $g.Zertifikate += $s }
+        }
+        foreach ($u in ([regex]::Matches($x, "url='(http[^']+)'") | ForEach-Object { $_.Groups[1].Value })) {
+            try { $h = ([uri]$u).Host } catch { $h = '' }
+            if ($h -and ($g.Urls -notcontains $h)) { $g.Urls += $h }
+        }
+        foreach ($a in ([regex]::Matches($x, "<Action name='([^']+)'") | ForEach-Object { $_.Groups[1].Value })) {
+            if ($g.Gruende -notcontains $a) { $g.Gruende += $a }
+        }
+    }
+    return @($gruppen.Values | Where-Object { $_.Code } | Sort-Object Zeit)
+}
+
+function Action-14 {
+    Titel '14' 'URSACHE AUFZEICHNEN'
+    Info 'Das hier ist der letzte Schritt, wenn Punkt 1 nichts findet und'
+    Info 'HILLCAT trotzdem kommt.'
+    Write-Host ""
+    Info 'Windows kann jede Zertifikatspruefung mitschreiben. Das ist ab Werk'
+    Info 'aus. Ich schalte es ein, du stellst den Fehler nach, ich werte aus'
+    Info 'und schalte es wieder aus. Dabei wird nichts veraendert.'
+    Write-Host ""
+
+    $start = Get-Date
+    if (-not (Set-CapiProtokoll -Zustand 'An')) {
+        Fail 'Das Protokoll liess sich nicht einschalten.'
+        Info 'Das Werkzeug muss dafuer als Administrator laufen.'
+        return
+    }
+    Ok 'Aufzeichnung laeuft.'
+
+    Zeige-Schritte -Ueberschrift 'JETZT BIST DU DRAN' -Schritte @(
+        'Lass dieses Fenster offen',
+        'Starte Call of Duty',
+        'Warte, bis der Fehler kommt (oder bis das Spiel laeuft)',
+        'Komm hierher zurueck und druecke Enter'
+    )
+    $null = Read-Host "     Enter druecken, wenn du fertig bist"
+    $ende = Get-Date
+
+    Write-Host ""
+    Say "      Auswerten..." 'Gray'
+    $befund = Get-CapiBefund -Von $start -Bis $ende
+    $null = Set-CapiProtokoll -Zustand 'Aus'
+
+    if ($null -eq $befund) {
+        Fail 'Das Protokoll liess sich nicht lesen.'
+        return
+    }
+
+    # Wann ist das SPIEL gescheitert? Nur diese Zeitpunkte zaehlen.
+    $spielZeiten = @()
+    try {
+        foreach ($ev in @(Get-WinEvent -FilterHashtable @{
+                LogName = 'System'; ProviderName = 'Schannel'; Id = 36876
+                StartTime = $start; EndTime = $ende } -ErrorAction Stop)) {
+            $d = @{}
+            foreach ($n in ([xml]$ev.ToXml()).Event.EventData.Data) { $d[$n.Name] = "$($n.'#text')" }
+            if ($d['CallerProcessImageName'] -match '^(cod|bootstrapper|BlackOps|ModernWarfare)') { $spielZeiten += $ev.TimeCreated }
+        }
+    } catch {}
+
+    Ok ("aufgezeichnet: {0} fehlgeschlagene Pruefungen, davon {1} zum Zeitpunkt eines Spielfehlers" -f
+        $befund.Count, @($befund | Where-Object { $z = $_.Zeit; @($spielZeiten | Where-Object { [Math]::Abs(($_ - $z).TotalSeconds) -le 2 }).Count -gt 0 }).Count)
+
+    if ($spielZeiten.Count -eq 0) {
+        Write-Host ""
+        Ok 'Das Spiel hat waehrend der Aufzeichnung keine Zertifikatspruefung'
+        Ok 'abgebrochen.'
+        Info 'Entweder lief es diesmal, oder die Ursache liegt woanders.'
+        if ($befund.Count -gt 0) { Info 'Die Fehler anderer Programme sind hier normal und folgenlos.' }
+        return
+    }
+
+    # Nur die Pruefungen, die zeitlich zum Spielfehler passen.
+    $treffer = @($befund | Where-Object {
+        $z = $_.Zeit
+        @($spielZeiten | Where-Object { [Math]::Abs(($_ - $z).TotalSeconds) -le 2 }).Count -gt 0
+    })
+    if ($treffer.Count -eq 0) {
+        Write-Host ""
+        Warn ("Das Spiel ist {0}x gescheitert, im Protokoll steht dazu aber nichts." -f $spielZeiten.Count)
+        Info 'Das passiert, wenn die Aufzeichnung erst nach dem Fehler lief.'
+        Info 'Bitte noch einmal versuchen und das Spiel erst DANACH starten.'
+        return
+    }
+
+    Write-Host ""
+    Write-Host "   GEFUNDEN" -ForegroundColor Yellow
+    $zert = @($treffer | ForEach-Object { $_.Zertifikate } | Select-Object -Unique)
+    $wo   = @($treffer | ForEach-Object { $_.Urls } | Select-Object -Unique)
+    $wieso = @($treffer | ForEach-Object { $_.Gruende } | Select-Object -Unique)
+    Info ("Zeitpunkt:    {0}" -f $treffer[0].Zeit.ToString('dd.MM. HH:mm:ss'))
+    Info ("Zertifikat:   {0}" -f (($zert | Select-Object -First 2) -join ' <- '))
+    if ($wo)    { Info ("Auskunft bei: {0}" -f ($wo -join ', ')) }
+    if ($wieso) { Info ("Verworfen:    {0}" -f ($wieso -join ', ')) }
+
+    # Und jetzt der eigentliche Zweck: erreicht dieser PC die Auskunft?
+    $gesperrt = @()
+    $kontrolle = Get-KontrollDns
+    foreach ($h in $wo) {
+        $a = Resolve-Probe -Name $h
+        if ($a -match '^\d') { continue }
+        if ($a -eq 'gesperrt') { $gesperrt += $h }
+        elseif ($kontrolle -and ((Resolve-Probe -Name $h -Server $kontrolle) -match '^\d')) { $gesperrt += $h }
+    }
+
+    Write-Host ""
+    if ($gesperrt.Count -gt 0) {
+        Fail 'Und genau diese Auskunft ist bei dir gesperrt:'
+        foreach ($h in $gesperrt) { Info "  $h" }
+        Info 'Ein anderer DNS kennt die Adresse - deiner nicht. Das ist ein'
+        Info 'DNS-Filter, ein Eintrag in der hosts-Datei oder eine Sperre'
+        Info 'im Router.'
+        Zeige-Schritte -Ueberschrift 'DIESE ADRESSE FREIGEBEN' -Schritte @(
+            'Oeffne die Oberflaeche deines Filters (AdGuard Home, Pi-hole ...)',
+            'Gehe zu den eigenen Filterregeln oder zur Freigabeliste',
+            'Trage die Adresse von oben ein',
+            'Speichern'
+        )
+        Info 'Schreibweise fuer AdGuard Home:'
+        foreach ($h in $gesperrt) { Info "  @@||$h^`$important" }
+        Info 'Das ist unbedenklich: dieser Server beantwortet nur die Frage,'
+        Info 'ob ein Zertifikat noch gueltig ist.'
+    } elseif ($wo.Count -gt 0) {
+        Ok 'Die Auskunftsserver sind von hier aus erreichbar.'
+        Info 'Dann war die gespeicherte Antwort abgelaufen und Windows hat'
+        Info 'keine neue geholt.'
+    } else {
+        Info 'Zu dieser Pruefung ist keine Adresse protokolliert. Meist heisst'
+        Info 'das: Windows hat nur im Zwischenspeicher nachgesehen.'
+    }
+
+    Write-Host ""
+    Info 'In beiden Faellen hilft, die gespeicherten Auskuenfte zu verwerfen -'
+    Info 'sonst haelt Windows an der alten, abgelaufenen Antwort fest.'
+    if (Frage-JaNein "     Gespeicherte Sperrauskuenfte jetzt verwerfen? (j/n)") {
+        $null = Clear-Sperrspeicher
+    }
+
+    # Bericht ablegen - nachlesbar und weitergebbar, ohne das Protokoll erneut
+    # einschalten zu muessen.
+    Ensure-BackupRoot
+    $datei = Join-Path $Script:BackupRoot ('Zertifikat-Aufzeichnung_{0}.txt' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    $text = @("Aufzeichnung $($start.ToString('dd.MM.yyyy HH:mm:ss')) bis $($ende.ToString('HH:mm:ss'))",
+              "Fehler des Spiels: $($spielZeiten.Count)",
+              "Passende Pruefungen: $($treffer.Count)",
+              '')
+    foreach ($t in $treffer) {
+        $text += ('{0}  Code {1}  Prozess {2}' -f $t.Zeit.ToString('HH:mm:ss.fff'), $t.Code, $t.Prozess)
+        $text += ('   Zertifikat: ' + ($t.Zertifikate -join ' <- '))
+        if ($t.Urls)    { $text += ('   Auskunft:   ' + ($t.Urls -join ', ')) }
+        if ($t.Gruende) { $text += ('   Verworfen:  ' + ($t.Gruende -join ', ')) }
+    }
+    if ($gesperrt.Count -gt 0) { $text += ''; $text += ('GESPERRT: ' + ($gesperrt -join ', ')) }
+    try {
+        $text | Out-File -FilePath $datei -Encoding utf8
+        Write-Host ""
+        Info "Bericht: $datei"
+    } catch {}
+}
+
+function Action-14b {
+    Titel '14b' 'AUFZEICHNUNG AUSSCHALTEN'
+    # Sicherheitsnetz: falls das Fenster waehrend der Aufzeichnung geschlossen
+    # wurde, laeuft das Protokoll sonst weiter und schreibt dauerhaft mit.
+    if (Set-CapiProtokoll -Zustand 'Aus') { Ok 'Das ausfuehrliche Protokoll ist aus.' }
+    else { Fail 'Das Protokoll liess sich nicht ausschalten.' }
+    Info 'Geaendert hat die Aufzeichnung nie etwas - sie hat nur zugesehen.'
 }
 
 # ============================== 7  OVERLAYS ===================================
@@ -2453,7 +2981,16 @@ function Action-D {
     if ($sv.Gesperrt.Count -gt 0) { Fail ('gesperrte Spieladressen: ' + ($sv.Gesperrt -join ', ')) }
     elseif ($sv.DnsLebt)          { Ok "alle $($Script:SpielAdressen.Count) Spieladressen loesen auf" }
     if ($sv.Hosts.Count -gt 0)    { Warn "hosts-Datei leitet $($sv.Hosts.Count) Spieladresse(n) um" }
-    if (($sv.Vpn.Count -gt 0) -or ($sv.Gesperrt.Count -gt 0) -or ($sv.Hosts.Count -gt 0) -or (-not $sv.DnsLebt)) {
+    # Fehlgeschlagene Zertifikatspruefungen: die Diagnose liest hier nur das
+    # Systemprotokoll - schnell und ohne eine einzige Verbindung aufzubauen.
+    $sf = Get-Sperrfehler -Tage 14
+    if ($sf -and ($sf.Anzahl -gt 0)) {
+        Warn ("Zertifikatspruefung des Spiels {0}x fehlgeschlagen (14 Tage, zuletzt {1})" -f $sf.Anzahl, $sf.Letzter.ToString('dd.MM. HH:mm'))
+    } elseif ($sf) {
+        Ok 'Zertifikatspruefung des Spiels ohne Fehlversuch (14 Tage)'
+    }
+    if (($sv.Vpn.Count -gt 0) -or ($sv.Gesperrt.Count -gt 0) -or ($sv.Hosts.Count -gt 0) -or
+        (-not $sv.DnsLebt) -or ($sf -and ($sf.Anzahl -gt 0))) {
         Info '  -> Hilfe dazu: Menue 4, Punkt 1 (Download fehlgeschlagen)'
     }
     Write-Host ""
@@ -2710,7 +3247,10 @@ $Script:Kategorien = @(
                Fix  = 'Action-6';  Undo = 'Action-6b' },
             @{ Text = 'Firewall blockiert das Spiel'
                Wann = 'kein Multiplayer, Onlinedienst nicht erreichbar'
-               Fix  = 'Action-8';  Undo = 'Action-8b';  Backup = '8_Firewall' }
+               Fix  = 'Action-8';  Undo = 'Action-8b';  Backup = '8_Firewall' },
+            @{ Text = 'Ursache aufzeichnen (wenn nichts geholfen hat)'
+               Wann = 'HILLCAT bleibt, obwohl Punkt 1 nichts gefunden hat'
+               Fix  = 'Action-14'; Undo = 'Action-14b' }
         )
     },
     @{

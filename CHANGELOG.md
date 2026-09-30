@@ -4,6 +4,25 @@ Alle nennenswerten Änderungen an CoD-Fix. Neueste Fassung zuerst.
 
 ---
 
+## v3.4
+
+### Neu
+
+- **Gesperrte Auskunftsserver als Ursache für HILLCAT.** Windows prüft bei jeder verschlüsselten Verbindung, ob das Zertifikat der Gegenstelle zurückgezogen wurde, und fragt dafür bei einem **eigenen** Server nach — etwa `status.geotrust.com` für die Anmeldeserver von Demonware. Diese Adressen gehören nicht dem Spiel und stehen auf keiner Spieladressen-Liste. Sperrt ein DNS-Filter eine davon, bricht die Verbindung ab, obwohl **alle** Spieladressen einwandfrei auflösen — der Grund ist praktisch unauffindbar. Punkt **4 → 1** prüft diese Adressen jetzt mit: sowohl die aus den Zertifikaten der erreichbaren Server gelesenen als auch eine feste Liste der großen Zertifizierungsstellen. Gemeldet wird nur, was ein unabhängiger DNS kennt.
+- **Abgelaufene gespeicherte Auskünfte.** Windows merkt sich jede Antwort. Ist die gespeicherte abgelaufen und der Auskunftsserver gerade nicht erreichbar, verwirft Windows sie und meldet in Millisekunden „Sperrserver offline" — ohne es noch einmal zu versuchen. Nach einer Freigabe im Filter bleibt es deshalb kaputt, bis der Eintrag weg ist. Das Werkzeug bietet an, ihn zu verwerfen; Windows holt die Auskunft beim nächsten Bedarf neu.
+- **Zertifikate der Spielserver werden selbst geprüft.** Das füllt zugleich den Zwischenspeicher von Windows, sodass die Prüfung beim nächsten Spielstart sofort erledigt ist.
+- **Fehlversuche werden gezählt.** Windows schreibt jeden ins Systemprotokoll (Quelle Schannel, Ereignis 36876). Gezählt werden nur die des Spiels. Auf Wunsch verlängert das Werkzeug zusätzlich die Frist für die Prüfung auf 30 bzw. 60 Sekunden (Standard: 15 und 20) — abgeschaltet wird nichts, geprüft wird weiterhin alles. Zurücknehmbar über **4 → 1b**.
+- **Ursache aufzeichnen (4 → 4).** Der Ausweg, wenn Punkt 1 nichts findet und HILLCAT trotzdem kommt. Schaltet Windows' ausführliches Zertifikatsprotokoll (`CAPI2`) ein, du stellst den Fehler nach, das Werkzeug wertet aus und schaltet es wieder aus. Es verknüpft dabei zwei Protokolle: das Systemprotokoll sagt, **wann** das Spiel gescheitert ist, das CAPI2-Protokoll sagt, **was** in derselben Sekunde geprüft wurde — die Prüfung läuft nämlich nicht im Spiel, sondern in `lsass`. Ergebnis ist ein Satz statt eines Rätsels: welches Zertifikat, welcher Auskunftsserver, welcher Grund — und ob dieser PC den Server überhaupt erreicht. Verändert wird nichts. Der Bericht landet im Backup-Ordner.
+- **Diagnose** zählt die fehlgeschlagenen Zertifikatsprüfungen der letzten 14 Tage.
+
+### Geändert
+
+- **„Rückgängig" für Punkt 4 → 1 findet jetzt beides.** Die Aktion ändert zweierlei, selten beides am selben Tag. Gesucht wird deshalb je Änderung die jüngste Sicherung, die sie wirklich enthält — nicht mehr pauschal die jüngste Sicherung.
+- Ein Durchlauf legt höchstens **eine** Sicherung an, auch wenn er mehreres ändert.
+- **Mit aktivem VPN endete Punkt 4 → 1 bisher nach dem VPN-Hinweis.** Jetzt entfällt nur der DNS-Schritt, alles andere läuft weiter — die Zertifikatsprüfung hat mit dem DNS nichts zu tun und ist gerade mit VPN aufschlussreich.
+
+---
+
 ## v3.3
 
 ### Behobene Fehler

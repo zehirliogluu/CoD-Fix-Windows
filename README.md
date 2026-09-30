@@ -8,7 +8,7 @@
 
 ![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6?style=for-the-badge&logo=windows&logoColor=white)
 ![PowerShell](https://img.shields.io/badge/PowerShell-5.1-5391FE?style=for-the-badge&logo=powershell&logoColor=white)
-![Version](https://img.shields.io/badge/Version-3.3-brightgreen?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-3.4-brightgreen?style=for-the-badge)
 ![Lizenz](https://img.shields.io/badge/Lizenz-MIT-blue?style=for-the-badge)
 
 ![Steam](https://img.shields.io/badge/Steam-✓-000000?style=flat-square&logo=steam&logoColor=white)
@@ -68,7 +68,7 @@
   ================================================================
 
       C A L L   O F   D U T Y   -   F I X - W E R K Z E U G
-                                                        v3.3
+                                                        v3.4
   ================================================================
 
     WO LIEGT DAS PROBLEM?
@@ -105,7 +105,7 @@ Das Untermenü ist **genauso aufgebaut** — Zahl, Überschrift, darunter grau d
   ================================================================
 
       C A L L   O F   D U T Y   -   F I X - W E R K Z E U G
-                                                        v3.3
+                                                        v3.4
   ================================================================
 
     TON / MIKROFON
@@ -235,9 +235,10 @@ Beendet vorher Spiel **und** Launcher, damit nichts zurückgeschrieben wird.
 
 | Problem | Was passiert |
 |---|---|
-| **Download fehlgeschlagen (HILLCAT)** | Prüft VPN, DNS-Filter, `hosts`-Datei und zwölf Spieladressen — und stellt den DNS nur um, wenn das sicher geht |
+| **Download fehlgeschlagen (HILLCAT)** | Prüft VPN, DNS-Filter, `hosts`-Datei, zwölf Spieladressen und die Zertifikatsprüfung von Windows — und ändert nur, was sicher zurückzunehmen ist |
 | **Verbindungsfehler, Disconnects** | DNS-Cache leeren, Winsock zurücksetzen, TCP/IP-Stack zurücksetzen, IP erneuern |
 | **Firewall blockiert das Spiel** | Blockierende Regeln zeigen und **nach Rückfrage** entfernen, Freigaben für alle Spiel-EXEs anlegen (ein- und ausgehend) |
+| **Ursache aufzeichnen** | Schaltet Windows' ausführliches Zertifikatsprotokoll ein, du stellst den Fehler nach, das Werkzeug nennt dir das genaue Zertifikat und den Server, der nicht erreichbar war |
 
 **Warum „Prüfung auf Update" hängen bleibt:** Nach dem Start lädt Call of Duty eigene Datenpakete nach — unabhängig von Steam oder Battle.net. Scheitert das, bleibt der Balken stehen oder es erscheint **Fehlercode HILLCAT**. Eine Neuinstallation hilft dann fast nie, denn es liegt am **Weg** zu den Activision-Servern. Die Aktion prüft ihn der Reihe nach:
 
@@ -249,8 +250,29 @@ Beendet vorher Spiel **und** Launcher, damit nichts zurückgeschrieben wird.
 | DNS-Filter | sperrt keine bekannte Adresse | Anleitung, im Abfrageprotokoll des Filters nach der Sperre zu suchen |
 | DNS | von Hand gesetzt, antwortet nicht | Bietet an, ihn auf „automatisch" zurückzusetzen — oft Rest eines getrennten VPNs |
 | alles unauffällig | — | Bietet Cloudflare (1.1.1.1) als DNS an — der häufigste Fix für HILLCAT |
+| Zertifikatsprüfung | DNS sperrt einen Auskunftsserver (`ocsp.…`, `crl.…`, `status.…`) | Nennt genau diese Adressen samt Schreibweise für die Freigabeliste |
+| Zertifikatsprüfung | Windows erreicht die Sperrauskunft nicht | Zählt die Fehlversuche, bietet an, die gespeicherten Auskünfte zu verwerfen und die Frist zu verlängern |
 
 Beim Umstellen merkt sich das Werkzeug, ob dein DNS vorher **von Hand eingetragen** war oder **automatisch** vom Router kam, und stellt mit **4 → 1b** exakt diesen Zustand wieder her. Löst nach der Umstellung nichts mehr auf, wird **sofort automatisch zurückgestellt**.
+
+**Der stille Abbrecher: die Zertifikatsprüfung.** Bei jeder verschlüsselten Verbindung prüft Windows, ob das Zertifikat der Gegenstelle zurückgezogen wurde. Dafür fragt es bei einem **eigenen** Server nach — zum Beispiel bei `status.geotrust.com`, wenn es um die Anmeldeserver von Demonware geht. Diese Adressen gehören nicht dem Spiel und stehen auf keiner Liste von Spieladressen.
+
+Genau das macht den Fehler so schwer zu finden: Sperrt dein DNS-Filter eine solche Adresse, lösen **alle** Spieladressen weiterhin einwandfrei auf — und trotzdem bricht die Verbindung ab. Windows meldet `0x80092013`, das Spiel zeigt HILLCAT. Im Filter-Protokoll sucht man dann vergeblich nach „activision" oder „callofduty".
+
+Noch unangenehmer: Windows **merkt sich** jede Auskunft. Ist die gespeicherte abgelaufen und der Auskunftsserver gerade nicht erreichbar, verwirft Windows sie und gibt **in Millisekunden** auf, ohne einen einzigen Netzabruf. Deshalb bleibt es nach einer Freigabe im Filter zunächst kaputt — der alte Eintrag muss weg.
+
+Die Aktion prüft deshalb:
+
+- die Auskunftsadressen aus den Zertifikaten der erreichbaren Spielserver **und** eine feste Liste der großen Zertifizierungsstellen,
+- ob Windows in den letzten 14 Tagen Fehlversuche protokolliert hat (Quelle `Schannel`, Ereignis `36876`),
+
+und bietet an, die gespeicherten Auskünfte zu verwerfen sowie die Frist von 15 auf 30 Sekunden je Abruf zu verlängern. Abgeschaltet wird nichts, geprüft wird weiterhin alles. Rücknehmbar mit **4 → 1b**.
+
+**Wenn das alles nichts findet: 4 → 4 zeichnet die Ursache auf.** Windows kann jede einzelne Zertifikatsprüfung mitschreiben (Protokoll `CAPI2`, ab Werk aus). Das Werkzeug schaltet es ein, du stellst den Fehler nach, es wertet aus und schaltet es wieder aus.
+
+Der Trick dabei ist die Verknüpfung zweier Protokolle: Das **Systemprotokoll** sagt, *wann* das Spiel gescheitert ist (`Schannel`, Ereignis `36876`, Prozess `cod`). Das **CAPI2-Protokoll** sagt, *was* in derselben Sekunde geprüft wurde — denn die Prüfung selbst läuft nicht im Spiel, sondern in `lsass`. Ohne diese Verknüpfung wäre aus hunderten Einträgen nicht zu erkennen, welcher zum Spiel gehört.
+
+Am Ende steht kein Rätsel mehr, sondern ein Satz: *dieses Zertifikat, dieser Auskunftsserver, dieser Grund* — und ob dein Anschluss diesen Server überhaupt erreicht. Verändert wird dabei nichts; das Protokoll sieht nur zu. Der Bericht landet im Backup-Ordner.
 
 Vor jeder Firewall-Änderung wird die **komplette Regelsammlung** gesichert — damit lässt sich das Entfernen einer Blockade später wirklich zurücknehmen.
 
